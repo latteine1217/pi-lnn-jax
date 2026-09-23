@@ -1,0 +1,72 @@
+# configs/mini_smoke.toml — train_kolmogorov.py mini smoke 預設配置
+#
+# What: T=11 / K=25 / d_model=32 規模，作為 train_kolmogorov.py 的本地 smoke config；
+#       供 M3 在 ~60-90s 內驗證整合管線通透。
+# Why: production train_kolmogorov.py 在 GPU 跑 5k iter baseline，但 M3 必須先做
+#      smoke 確保 model + ckpt + GradNorm + AL + eval 全鏈路無 bug。
+
+[train]
+sensor_jsons = [
+  "data/kolmogorov_sensors/re1000/sensors_qrpivot_K100_N128_t0-5.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re1000/sensors_qrpivot_K100_N128_t0-5_dns_values.npz",
+]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_ds4.npy",
+]
+re_values = [1000.0]
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構（M3 mini）──
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 32
+d_time = 8
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 1
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 32
+output_head_gain = 1.0
+operator_rank = 32
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── Loss weights ──
+data_loss_weight = 1.0
+physics_loss_weight = 0.01
+poisson_loss_weight = 0.0
+
+# ── 訓練設定（mini）──
+iterations = 50
+num_physics_points = 16
+learning_rate = 3e-3
+max_grad_norm = 1.0
+checkpoint_period = 25
+seed = 42
+artifacts_dir = "artifacts/mini_smoke"
+
+# GradNorm + AL 預設關（CLI 開）
+use_gradnorm = false
+gradnorm_freq = 25
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+al_rho = 1.0
+al_lambda_clip = 10.0
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false
+
+# 2026-08-03（架構候選 H）：以下四鍵原本省略，落到 schema 預設。
+# 寫的就是它們原本拿到的值（實測 legacy_config 解析結果），行為不變——
+# 目的是讓「schema 預設」不再是任何 config 的實際來源，那個預設才動得了。
+lr_warmup_steps = 0
+lr_decay_steps = 0
+lr_decay_gamma = 1.0
+t_early_weight = 1.0
+

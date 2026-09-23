@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH --job-name=jax_alacc_{EXP_ID}
+#SBATCH --output=logs/jax_alacc_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_alacc_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# 梯度累積讓 AL 的 C^2 項在生產設定下偏多少（model-audit B-11）
+# 回答的問題：bias = 0.5*rho*Var_chunks[C] 佔 total loss 幾成
+#
+# 為什麼要 GPU：ckpt 是 GPU 寫的，orbax 在 head node 的 CPU JAX 上推不出 sharding。
+# 另外本診斷要跑真實 forward+backward，本來就不該在 head node 上跑。
+#
+# 環境變數：
+#   FULL_REF=1   另跑 M=1 全量對照，驗證恆等式。**只在 K<=200 開**；
+#                K=800/M=16 的全量 backward 就是 M 存在的理由，會 OOM。
+#   DRAWS        獨立抽樣次數（預設 8）
+#
+# optimizer 旗標：診斷腳本預設就是生產組合（schedule_free / soap / pf=2），且會拿
+# 解析結果跟該 run 的 summary.json 對帳，不合直接失敗——所以這裡不重複一份，
+# 避免兩個地方各記一次而漂移。
+#
+# 用法：
+#   FULL_REF=1 TMPL=scripts/slurm/diag_alacc.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh k200s42 configs/exp_ksweep_k200_s42.toml
+#   TMPL=scripts/slurm/diag_alacc.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh k800s42 configs/exp_ksweep_k800_s42.toml
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+EXTRA=""
+[ "${FULL_REF:-0}" = "1" ] && EXTRA="--full-ref"
+# GRAD_CONTROLS=1：加梯度層的兩個對照（ρ=0 純噪聲地板 + 相鄰抽樣的取樣噪聲）。
+# 需 FULL_REF=1；會重建一次 context（只改 al_rho），時間約多一倍。
+[ "${GRAD_CONTROLS:-0}" = "1" ] && EXTRA="$EXTRA --grad-controls"
+
+echo "======================================================================"
+echo "[JAX-ALACC-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  config:   {CONFIG_PATH}"
+echo "  full_ref: ${FULL_REF:-0}   draws: ${DRAWS:-8}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+uv run python -u scripts/diag_grad_accum_al_bias.py \
+  --config "{CONFIG_PATH}" \
+  --resume latest \
+  --draws "${DRAWS:-8}" \
+  ${EXTRA}
+
+echo "[$(date '+%F %T')] ALACC-{EXP_ID} 完成"

@@ -1,0 +1,85 @@
+# configs/exp_ksweep_k50_s3.toml — K-sweep 5-seed campaign（派生自 exp_245k50_les_T50.toml）
+# K=50, training seed=3。5-seed 升級 tab:kscaling（原單 seed）。與 K=100 pv_les 同 regime。
+
+# configs/exp_245k50_les_T50.toml — K-sweep K=50 點（sec:placement nonlinear sufficiency）
+#
+# What:
+#   EXP-245 (B3 + LES_T50 sensor + Re=10000 + 20k iter) 的 K-sweep K=50 變體。
+#   與 exp_245_b3_les_T50.toml 完全相同，僅 sensor 檔（K=50）與 artifacts_dir 不同。
+#
+# Why:
+#   placement 論證的第 5 層：用完整 nonlinear DeepONet/CfC 跑 K∈{50,100,200} sweep，
+#   驗證 reconstruction error 在 K=100 前已 plateau。sensors 由 generate_sensors_qrpivot_from_les.py
+#   以同一 LES T50standalone QR-pivot（t_spinup=20）生成 → K=50⊂K=100⊂K=200 nested。
+
+[train]
+# ── 資料（唯一與 exp_245 不同處：K=50 sensors）─────────────────────────
+sensor_jsons = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K50_N256_t0-5_si100_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K50_N256_t0-5_si100_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy"]
+re_values = [10000.0]
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構 (B3 full, 對齊 pi-lnn EXP-245) ──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 3
+artifacts_dir = "artifacts/kolmogorov/ksweep_k50_s3"
+
+# ── LR schedule（對齊 pi-lnn EXP-245）─────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ─────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ─────────────────────────────────────────────
+al_update_freq = 100
+soap_betas = [0.9, 0.999]
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false

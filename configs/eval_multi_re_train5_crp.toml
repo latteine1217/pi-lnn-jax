@@ -1,0 +1,80 @@
+# configs/eval_multi_re_train5_crp.toml — CRP run 8-Re 泛用性評估 manifest（指向 _crp artifacts）
+#
+# What:
+#   給 scripts/evaluate_multi_re.py 用。自含模型 arch（須與 exp_multi_re_train5 訓練一致）、
+#   re_norm_scale、artifacts_dir（ckpt 來源），以及全 8 個 Re 的 sensor + DNS 路徑。
+#
+# Why 自含：eval 端 model_kwargs 必須與訓練 byte-for-byte 一致（orbax restore + re_norm 條件）。
+#   held-out 子集 {3e3,8e3,3e4} 由 CLI --held-out 標記；train 子集 = 其餘。
+#
+# 用法（DNS 需先同步到 worktree/data/dns）：
+#   uv run python scripts/evaluate_multi_re.py --config configs/eval_multi_re_train5.toml \
+#     --ckpt latest --held-out 3000,8000,30000
+
+[train]
+# ── 8-Re eval manifest（順序不影響；script 依 held_out 排表）──────────
+re_values = [1000.0, 3000.0, 5000.0, 8000.0, 10000.0, 30000.0, 50000.0, 1000000.0]
+sensor_jsons = [
+  "data/sensors/sensors_qrpivot_K100_Re1000_N128_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re3000_N192_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re5000_N256_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re8000_N256_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re10000_N256_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re30000_N512_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re50000_N640_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re1000000_N1280_t0-5.json",
+]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_dt3p91e4_si64_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re3000_N192_T5_dt2p60e4_si96_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re5000_N256_T5_dt1p95e4_si128_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re8000_N256_T5_dt1p95e4_si128_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re30000_N512_T5_dt9p51e5_si263_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re50000_N640_T5_dt7p84e5_si319_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000000_N1280_T5_dt3p32e5_si752_seed42.npy",
+]
+# eval 的時間軸取樣：與訓練 config exp_multi_re_train5*.toml 的
+# time_strides = [4, 4, 4, 4, 4] 相同。訓練只涵蓋 5 個 train Re；held-out 三個
+# 沿用同一 cadence（sensor 由同一批 DNS 以相同 si 產生），故此處明寫 8 個。
+# 明寫的理由：evaluation_protocol 的 follow_training 模式由此讀取，
+# 缺這個鍵會退回訓練 fallback 2，而本家族實際用的是 4。
+time_strides = [4, 4, 4, 4, 4, 4, 4, 4]
+re_norm_scale = 1000000.0
+observed_sensor_channels = ["u", "v"]
+# ckpt 來源（與訓練 config 相同）
+artifacts_dir = "artifacts/kolmogorov/multi_re_train5_crp"
+
+# ── 模型架構（必須與 exp_multi_re_train5.toml byte-for-byte 一致）──────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "vector"
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+seed = 42
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false
+
+# 2026-08-03（架構候選 H）：以下四鍵原本省略，落到 schema 預設。
+# 寫的就是它們原本拿到的值（實測 legacy_config 解析結果），行為不變——
+# 目的是讓「schema 預設」不再是任何 config 的實際來源，那個預設才動得了。
+lr_warmup_steps = 0
+lr_decay_steps = 0
+lr_decay_gamma = 1.0
+t_early_weight = 1.0
+

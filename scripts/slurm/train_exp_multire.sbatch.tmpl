@@ -1,0 +1,91 @@
+#!/bin/bash
+#SBATCH --job-name=jax_exp_{EXP_ID}
+#SBATCH --output=logs/jax_exp_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_exp_{EXP_ID}_%j.err
+#SBATCH --time=14-00:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# What:
+#   pi-lnn-jax multi-Re 訓練 sbatch template。與 train_exp.sbatch.tmpl 差異只有兩點：
+#     1) 訓練指令加 --multi_re（否則 _load_datasets 只載 sensor_jsons[0]，等於單-Re）
+#     2) 移除結尾 evaluate_exp245.py auto-eval（它寫死 Re=10000 且用 re_norm_scale=1e4，
+#        對 re_norm_scale=1e6 訓練的 multi-Re 模型會餵錯條件 → 誤導）。held-out 測試集
+#        ({3e3,8e3,3e4}) 的泛用性評估改用獨立 evaluate_multi_re（另跑）。
+#
+# Why:
+#   - submit 用 TMPL 覆寫：TMPL=scripts/slurm/train_exp_multire.sbatch.tmpl \
+#       scripts/slurm/submit_exp.sh multi_re_train5 configs/exp_multi_re_train5.toml
+#   - 資源/環境檢查與標準 template 一致（acmt20：8 CPU / 48G / 1 GPU，兩 job 同節點並行）。
+
+set -euo pipefail
+
+# ─── 1. 進到 repo root ────────────────────────────────────────────────
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+# ─── 2. 環境 ──────────────────────────────────────────────────────────
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+# pi-lnn data root（fallback；multi-Re sensors/DNS 主要走 PILNJAX_ROOT=worktree/data）
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH；先在 lab-server 裝 uv" >&2; exit 2; }
+# Compute node 無 internet；強制 offline，要求 head node 已 uv sync
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；請先在 head node 跑 'uv sync --python 3.12'" >&2; exit 3; }
+
+export JAX_PLATFORMS=cuda
+# 關閉 90% 預配置，讓兩 job 同節點各 GPU 按需配置
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+# ─── 3. 環境摘要 ──────────────────────────────────────────────────────
+echo "======================================================================"
+echo "[JAX-EXP-{EXP_ID} multi-Re] $(date '+%F %T')  slurm_job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  repo:      $(pwd)"
+echo "  config:    {CONFIG_PATH}"
+echo "  cuda vis:  ${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "  cpus:      ${SLURM_CPUS_PER_TASK:-?}   mem: ${SLURM_MEM_PER_NODE:-?} MB"
+echo "  JAX_PLATFORMS=${JAX_PLATFORMS}  preallocate=${XLA_PYTHON_CLIENT_PREALLOCATE}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv --version
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+# ─── 4. 訓練（multi-Re）──────────────────────────────────────────────
+# 與標準 template 同 recipe（schedule_free+soap+gradnorm+al+time_marching），
+# 多 --multi_re；--eval_every 2000 監控 d0(=Re1000) 重建（用 dns_paths[0]）。
+TRAIN_EXTRA_ARGS=""
+if [ -n "${ARTIFACTS_DIR:-}" ]; then
+  TRAIN_EXTRA_ARGS="--artifacts_dir ${ARTIFACTS_DIR}"
+  echo "[env] ARTIFACTS_DIR override = ${ARTIFACTS_DIR}"
+fi
+
+uv run python -u train_kolmogorov.py \
+  --config "{CONFIG_PATH}" \
+  --multi_re \
+  --arch liquid \
+  --optimizer schedule_free \
+  --base_optimizer soap \
+  --soap_precondition_frequency 2 \
+  --use_gradnorm \
+  --use_al \
+  --use_time_marching \
+  --tm_start_frac 0.1 \
+  --tm_warmup_steps 2000 \
+  --tm_ramp_steps 6000 \
+  --eval_every 2000 \
+  --save_every 1000 \
+  --log_every 500 \
+  --refine_optimizer none \
+  ${TRAIN_EXTRA_ARGS}
+
+TRAIN_RC=$?
+echo "[$(date '+%F %T')] JAX-EXP-{EXP_ID} multi-Re 訓練結束 rc=${TRAIN_RC}"
+echo "[note] held-out 測試集 {3e3,8e3,3e4} 泛用性評估走獨立 evaluate_multi_re（不在本 sbatch）"
+
+exit "${TRAIN_RC}"

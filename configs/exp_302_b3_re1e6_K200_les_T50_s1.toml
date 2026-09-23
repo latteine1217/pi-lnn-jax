@@ -1,0 +1,111 @@
+# configs/exp_302_b3_re1e6_K200_les_T50_s1.toml — Re=10⁶ 以 jax 主線協定重訓（seed=1）
+#
+# What:
+#   EXP-302 seed=1 — B3 + K=200 + LES_T50 DNS-free 佈點 + Re=10⁶，d_model=384、50k steps。
+#   5-seed campaign 成員（seeds 42/1/2/3/4）；seed=42 為 exp_302_b3_re1e6_K200_les_T50.toml（已跑）。
+#   逐行派生自 configs/exp_245k200_les_T50.toml（jax K=200 主線），只改 Re=10⁶ 必要項。
+#
+# Why:
+#   論文 tab:re1e6 的 Re=10⁶ 欄（KE 6.10% / u 15.62% / enstrophy 42.06% / kf 1.04）產自
+#   **PyTorch pi-lnn** 的 EXP-268（artifacts/kolmogorov/deeponet-cfc-re1000000-exp268-T50-K200-xl-50k），
+#   jax 端無任何 Re=10⁶ checkpoint。EXP-301 把 Re=1000 欄換成 jax 值後，該表變成
+#   「jax Re=10³ + PyTorch Re=10⁶」跨框架混用；且新增的 enstrophy_rel_err（jax compute_metrics）
+#   無法套用到 PyTorch checkpoint。本 run 以 jax 重做整個 Re=10⁶ 欄，使全表同框架同基準。
+#   使用者已裁決接受此欄 formal number 變更（KE 可能不再是 6.10%）。
+#
+# 派生 from exp_245k200_les_T50（jax K=200 主線），改動項：
+#   - sensor_jsons / sensor_npzs → Re=10⁶ K=200 LES_T50（N=512），與 PyTorch EXP-268 同一批資料
+#   - dns_paths / re_values      → Re=10⁶ DNS（N=512, 101 frames）
+#   - time_strides = [1]         → 必須明示（見下）
+#   - d_model 256 → 384          → Re=10⁶ 專屬容量（論文 caption 已揭露）
+#   - iterations 20000 → 50000   → Re=10⁶ 專屬預算（論文 caption 已揭露）
+#   - artifacts_dir              → exp302
+#
+# time_strides 必須明示 [1]（與 EXP-301 同一個坑）：
+#   Re=10⁶ sensor/DNS 皆 101 frames @ Δt=0.05；預設 stride=2 會餵 51 frames @ Δt=0.1，
+#   即主線一半的時間解析度。主線 Re=10⁴ 為 201 frames @ Δt=0.025，stride=2 後為 101 @ Δt=0.05，
+#   故本檔 stride=1 才與主線的 sensor 串流逐格對齊。
+#
+# 與 PyTorch EXP-268 的已知偏離（判讀時須揭露）：
+#   - num_physics_points：本檔用主線的 1024；EXP-268 用 512。collocation 已證為品質關鍵
+#     （見 knowledge/experiments/exp301-re1000-collocation-2026-07-18.md），故對齊主線而非 EXP-268。
+#     → 本 run 不是 EXP-268 的重現，是「jax 主線協定下的 Re=10⁶」。
+#   - gradnorm_min_weight：主線 0.05 floor；EXP-268 為 0.0。
+#   - 框架本身（JAX/Flax vs PyTorch）。
+#
+# 資料位置：sensors 在本專案 data/（版控），DNS 走 PILNJAX_DATA_ROOT，由 data.py 解析。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+sensor_jsons = [
+  "data/kolmogorov_sensors/re1000000/sensors_qrpivot_K200_N512_t0-5_si50_les_n512_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re1000000/sensors_qrpivot_K200_N512_t0-5_si50_les_n512_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_Re1e6_N512_T5_ds4.npy"]
+re_values = [1000000.0]
+observed_sensor_channels = ["u", "v"]
+time_strides = [1]
+
+# ── 模型架構 (B3 full；d_model 為 Re=10⁶ 專屬 XL 容量) ────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 384
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 50000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+# K=200 decode cross-attn OOM 解（沿用主線）：collocation+sensor-query 切 4 塊累積梯度。
+grad_accum_chunks = 4
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 1
+artifacts_dir = "artifacts/kolmogorov/exp302_b3_re1e6_K200_les_T50_jax_50k_s1"
+
+# ── LR schedule ──────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ─────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ─────────────────────────────────────────────
+al_update_freq = 100
+soap_betas = [0.9, 0.999]
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# legacy 鎖定（與主線一致）
+use_rwf = false
+cfc_input_dependent_tau = false

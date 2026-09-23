@@ -1,0 +1,192 @@
+#!/bin/bash
+#SBATCH --job-name=jax_ledger_{EXP_ID}
+#SBATCH --output=logs/jax_ledger_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_ledger_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# What:
+#   訓練管線重構（.superpowers/sdd/task-3-brief.md）Task 3：在當前（重構前）程式碼上
+#   錄製 golden RNG ledger。跑三個各 20 步的小 config，各自打開/關閉 spec §5.4
+#   五個條件式 RNG 消費點的不同子集，輸出三份 rng_ledger.json 供 Task 6
+#   tests/test_pipeline_replay.py 比對。由 scripts/slurm/submit_exp.sh（TMPL 覆寫）
+#   把 {EXP_ID} sed 替換後送 slurm；資源與 venv 前導比照 train_exp.sbatch.tmpl。
+#
+# Why 半節點資源：lab-server 慣例讓兩個 job 同節點並行（見全域 memory
+#   feedback_slurm_half_resources）。本 job 三段訓練各僅 20 步，wall time 需求極小，
+#   但 --time 仍依規定給 12h+（見 feedback_slurm_generous_time_limit：不自估訓練時間，
+#   保證跑完 > 精準抓時間）。
+#
+# Why f1/f2/f3 各自獨立、不共用 set -e 的 fail-fast：
+#   三段是各自獨立的 fixture 錄製，任一失敗（例如 config 路徑在 lab-server 上不存在）
+#   不該連坐拖垮另外兩段——目標是「一個 job 產出三份 fixture」，不是「一個 job 全有或
+#   全無」。三段訓練指令因此刻意不在 set -e 保護下（見下方 `set +e`），各自檢查 rc
+#   並印出可行動的錯誤訊息；環境/venv/cuDNN preflight 仍用 set -e fail-fast（那些是
+#   共用前提，壞了三段都跑不動，越早死越好）。
+#
+# Notes:
+#   - --time 用 slurm 標準 D-HH:MM:SS 格式
+#   - submit_exp.sh 把 {EXP_ID} 與 {CONFIG_PATH} sed 替換後 sbatch；本 job 的三個
+#     訓練 config 直接寫死在下方（f1/f2/f3 各自不同），{CONFIG_PATH} 只用於
+#     submit_exp.sh 的必要參數與下方環境摘要 echo，不影響實際跑哪個 config。
+#   - PILNN_RNG_LEDGER=1 是本 job 存在的唯一理由：沒開它，rng_ledger.json 不會產生，
+#     整個 job 白跑。
+
+set -euo pipefail
+
+# ─── 1. 進到 repo root ────────────────────────────────────────────────
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+# ─── 2. 環境 ──────────────────────────────────────────────────────────
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+# pi-lnn data root（sensor JSON + DNS .npy）— lab-server 端路徑覆寫 Mac 預設
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+# Kolmogorov multi-Re 的 sensor/DNS 實際落在別的 worktree（DNS 16G，不複製、不 symlink
+# 整個 data/ —— 本 worktree 的 data/ 內有 tracked 檔案，覆蓋會弄髒 git status）。
+# data._resolve_data_path 的搜尋序是 PILNJAX_ROOT → PILNJAX_DATA_ROOT，故由提交端指定；
+# 未設時退回本 worktree（單機或資料就在本地的情境）。
+export PILNJAX_ROOT="${PILNJAX_ROOT:-$(pwd)}"
+# 確保 uv 在 PATH（lab-server 可能裝在 ~/.local/bin 或 ~/.cargo/bin）
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH；先在 lab-server 裝 uv" >&2; exit 2; }
+# Compute node 通常無 internet；強制 uv offline 並要求 head node 已預跑
+# 'uv sync' 將 .venv + Python 預備好。違反此假設立即 fail。
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；請先在 head node 跑 'uv sync --python 3.12'" >&2; exit 3; }
+
+# JAX CUDA 設定（lab-server jax[cuda12] 已 wheel-installed）
+export JAX_PLATFORMS=cuda
+# 90% GPU memory pre-allocation（JAX 預設）可能與其他 job 衝突；改 false 讓 JAX 按需配置
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+# ─── 3. 列印環境摘要（方便事後 debug log） ────────────────────────────
+echo "======================================================================"
+echo "[JAX-LEDGER-{EXP_ID}] $(date '+%F %T')  slurm_job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  repo:      $(pwd)"
+echo "  config arg (submit_exp.sh 必要參數，本 job 實際用 f1/f2/f3 各自的 config): {CONFIG_PATH}"
+echo "  cuda vis:  ${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "  cpus:      ${SLURM_CPUS_PER_TASK:-?}"
+echo "  mem:       ${SLURM_MEM_PER_NODE:-?} MB"
+echo "  JAX_PLATFORMS=${JAX_PLATFORMS}  preallocate=${XLA_PYTHON_CLIENT_PREALLOCATE}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv --version
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+# ─── 3.5 preflight：cuDNN compile smoke（防 cuDNN drift 白跑整個 job）──────
+# compile 一個會走 cuDNN 的 conv。若 venv 漂移到壞版本（如 nvidia-cudnn-cu12 9.23.1.3
+# 與 jaxlib 0.10.1 不相容），這裡秒級 abort 並帶明確修法，而非訓練到第一步才丟難解的
+# XLA `dnn_support != nullptr` RET_CHECK。修法：head node 跑 scripts/slurm/setup_gpu_venv.sh。
+echo "[preflight] cuDNN compile smoke..."
+uv run python -c "import jax, jax.numpy as jnp; from jax import lax; lax.conv_general_dilated(jnp.ones((1,8,8,1)), jnp.ones((3,3,1,1)), (1,1), 'SAME', dimension_numbers=('NHWC','HWIO','NHWC')).block_until_ready(); print('[preflight] cuDNN OK')" \
+  || { echo '[ERR] cuDNN/GPU preflight 失敗（多半 nvidia-cudnn-cu12 漂到 9.23.1.3）→ head node 跑 scripts/slurm/setup_gpu_venv.sh 重建 venv（pin 9.23.0.39）後重送' >&2; exit 5; }
+
+# ─── 3.6 preflight：三份 config 的每一條資料路徑都要能解析 ─────────────────
+# Why: sensor/DNS 路徑是相對路徑，靠 PILNJAX_ROOT → PILNJAX_DATA_ROOT 兩段 fallback 解析。
+#      任何一條解析不到，會等到該段跑起來才 FileNotFoundError——排隊時間已經花掉。
+#      這裡在燒 GPU 前把三份 config 的全部路徑一次解完，缺哪一條直接點名。
+echo "[preflight] 解析 f1/f2/f3 的資料路徑..."
+uv run python - <<'PREFLIGHT' || { echo "[ERR] 資料路徑 preflight 失敗（見上方缺檔清單）→ 確認 PILNJAX_ROOT 指向含 data/sensors 與 data/dns 的 root" >&2; exit 6; }
+import sys
+from pi_lnn_jax.config import load_config
+from pi_lnn_jax.data import _resolve_data_path
+
+# 注意：_resolve_data_path 找不到時**不拋錯**，而是回傳 PILNJAX_ROOT/p 讓呼叫端
+# 產生清楚訊息（見 data.py:118-120，docstring 的「解析為存在的絕對路徑」是誤導）。
+# 因此這裡必須自己 .exists()——只包 try/except 會得到一個永遠通過的假守衛。
+missing = []
+for name in ("configs/_ledger_single_re.toml", "configs/_ledger_f2.toml"):
+    dk = load_config(name)["data_kwargs"]
+    for key in ("sensor_jsons", "sensor_npzs", "dns_paths"):
+        for p in dk.get(key, []):
+            resolved = _resolve_data_path(p)
+            if not resolved.exists():
+                missing.append(f"  {name} :: {key} :: {p}  →  {resolved}")
+if missing:
+    print("[preflight] 以下資料路徑解析不到：", file=sys.stderr)
+    print("\n".join(missing), file=sys.stderr)
+    sys.exit(1)
+print("[preflight] 資料路徑 OK")
+PREFLIGHT
+
+# ─── 3.7 清空輸出目錄 ────────────────────────────────────────────────────
+# Why: orbax 的 CheckpointManager 對已存在的 step 直接丟 StepAlreadyExistsError
+#      （ckpt.py:178 → checkpoint_manager.py:1461），所以同一個 artifacts_dir
+#      重錄第二次必炸。job 4734 就是這樣掛的：4727 留下 step 10/20 的 ckpt。
+# 安全性：只刪本 job 自己的三個子目錄，且它們是 gitignored 的可重生診斷輸出。
+for d in f1 f2 f3; do
+  target="artifacts/ledger/$d"
+  case "$target" in
+    artifacts/ledger/f[123]) rm -rf "$target" ;;   # 防手滑：路徑必須完全吻合
+    *) echo "[ERR] 拒絕刪除非預期路徑：$target" >&2; exit 8 ;;
+  esac
+done
+echo "[cleanup] artifacts/ledger/{f1,f2,f3} 已清空（避免 orbax StepAlreadyExists）"
+
+# ─── 4. 錄製三份 RNG ledger ─────────────────────────────────────────────
+# 診斷用環境變數：開啟後 train_kolmogorov.py 每步把 host-side 決策寫進
+# <artifacts_dir>/rng_ledger.json（見 pi_lnn_jax/pipeline/_ledger.py）。
+export PILNN_RNG_LEDGER=1
+
+# f1/f2/f3 各自獨立：任一失敗不阻擋其餘兩段（理由見檔頭 Why）。
+set +e
+FAIL=0
+
+echo ""
+echo "── f1：全關（single-Re / CRP off / n_sensor_query=0 / dropout off / RAR off）──"
+uv run python -u train_kolmogorov.py --config configs/_ledger_single_re.toml \
+    --steps 20 --seed 42 --arch liquid \
+    --artifacts_dir artifacts/ledger/f1 --eval_every 0
+RC_F1=$?
+if [ "$RC_F1" != "0" ]; then
+  echo "[ERR] f1 失敗 rc=${RC_F1}" >&2
+  FAIL=1
+fi
+
+echo ""
+echo "── f2：全開（multi-Re + CRP + sensor_idx + dropout；RAR 關）──"
+uv run python -u train_kolmogorov.py --config configs/_ledger_f2.toml \
+    --steps 20 --seed 42 --arch liquid --multi_re \
+    --sensor_dropout_rate 0.2 \
+    --artifacts_dir artifacts/ledger/f2 --eval_every 0
+RC_F2=$?
+if [ "$RC_F2" != "0" ]; then
+  echo "[ERR] f2 失敗 rc=${RC_F2}" >&2
+  FAIL=1
+fi
+
+echo ""
+echo "── f3：RAR 分支（single-Re / CRP off / n_sensor_query=0 / dropout off）──"
+uv run python -u train_kolmogorov.py --config configs/_ledger_single_re.toml \
+    --steps 20 --seed 42 --arch liquid \
+    --rar_freq 3 --rar_warmup 5 --rar_pool_size 128 \
+    --artifacts_dir artifacts/ledger/f3 --eval_every 0
+RC_F3=$?
+if [ "$RC_F3" != "0" ]; then
+  echo "[ERR] f3 失敗 rc=${RC_F3}" >&2
+  FAIL=1
+fi
+set -e
+
+# ─── 5. 總結 ─────────────────────────────────────────────────────────────
+echo ""
+echo "======================================================================"
+echo "[$(date '+%F %T')] JAX-LEDGER-{EXP_ID} 結束  f1_rc=${RC_F1}  f2_rc=${RC_F2}  f3_rc=${RC_F3}"
+for f in f1 f2 f3; do
+  led="artifacts/ledger/${f}/rng_ledger.json"
+  if [ -f "$led" ]; then
+    echo "  ${f}: ${led} OK"
+  else
+    echo "  ${f}: ${led} 缺失（該段訓練未成功產出 ledger）"
+  fi
+done
+echo "======================================================================"
+
+exit "$FAIL"

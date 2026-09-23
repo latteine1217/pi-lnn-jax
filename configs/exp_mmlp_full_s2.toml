@@ -1,0 +1,93 @@
+# Wang 2021 modified DeepONet 的**完整**跨分支 U/V gating（arXiv 2110.01654 §3.4）。
+# 既有 exp_modmlp_* 只做到 trunk 單邊（U/V 皆由座標產生），本臂補上原文缺的那一半：
+#   mmlp_branch_u    — U = φ(W_u·u + b_u)，u 取自 branch（sensor）tokens
+#   mmlp_gate_branch — branch 側也用同一組 U/V 逐層 gate（eq. 3.27）
+# 並依實驗設計關閉 cross-attention，測「mMLP 能否取代 cross-attention 做分支對齊」。
+#
+# ⚠️ 歸因限制：本批只跑這一格。既有 n=4 base 臂是 cross-attn **開啟** 的
+# （jobs 5411/5413/5415/5417），與本臂差兩個變因；同 base 同指標定義的
+# cross-attn-off + mMLP-off 對照臂尚未跑，補了才能把差異歸給 mMLP。
+# 衍生自 exp_modmlp_s1.toml（其 base 為 configs/exp_re10000_T20_les_qr_v3.toml）。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+sensor_jsons = [
+  "data/sensors/re10000/sensors_les_qr_K100_N256_t0-20_si128.json",
+]
+re_values = [10000.0]
+time_strides = [8]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T20_dt1p95e4_si128_seed42.npy",
+]
+observed_sensor_channels = ["u", "v"]
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── 模型架構（B3 + vector attention, no W_O）──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 20.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "vector"
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 2
+artifacts_dir = "artifacts/kolmogorov/mmlp_full_s2"
+
+# ── LR schedule ────────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ───────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+
+# legacy 鎖定：schema 預設已改 use_rwf/cfc_input_dependent_tau=on；此 Re=10000 baseline 明示
+# false 保留舊 param-tree（且維持 vs exp_re10000_T20_les_qr_v3_rwf 的 RWF A/B 對照）
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ───────────────────────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+al_update_freq = 100
+al_warmup_steps = 5000
+
+# ── SOAP betas ────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]
+
+# ── ablation: 完整版 mMLP（跨分支 U/V）+ cross-attention OFF ──
+use_modified_mlp = true
+mmlp_branch_u = true
+mmlp_gate_branch = true
+disable_cross_attention = true

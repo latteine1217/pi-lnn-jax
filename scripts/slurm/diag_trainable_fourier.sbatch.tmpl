@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=jax_tfdiag_{EXP_ID}
+#SBATCH --output=logs/jax_tfdiag_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_tfdiag_{EXP_ID}_%j.err
+#SBATCH --time=02:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# exp_508/509 的 |B| 落點診斷（方向1）。
+#
+# 為什麼要 GPU：診斷本身只是讀 params + numpy 統計，**不需要**算力。但 ckpt 是在
+# GPU 上寫的，而 restore_eval_params 走 lenient restore（reference_state=None），
+# 在 head node 的 CPU-only JAX 上 orbax 推不出 sharding，直接
+#   ValueError: sharding passed to deserialization should be specified ... Got None
+# 所以這支必須在有 GPU 的 node 上跑。實測過，不是預防性的猜測。
+#
+# 環境變數：
+#   ARTIFACTS_DIR   ckpt 所在（選填；不給則用 config 的 artifacts_dir）
+#   ARCH            liquid（預設）；須與訓練一致
+#   OUTPUT_SUBDIR   輸出子目錄（預設 trainable_fourier_diag）
+#
+# 用法：
+#   TMPL=scripts/slurm/diag_trainable_fourier.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh 508 configs/exp_508_b3_trainablefourier.toml
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+ARCH="${ARCH:-liquid}"
+SUBDIR="${OUTPUT_SUBDIR:-trainable_fourier_diag}"
+EXTRA=""
+[ -n "${ARTIFACTS_DIR:-}" ] && EXTRA="--artifacts_dir ${ARTIFACTS_DIR}"
+
+echo "======================================================================"
+echo "[JAX-TFDIAG-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  config:        {CONFIG_PATH}"
+echo "  ARCH:          ${ARCH}   OUTPUT_SUBDIR: ${SUBDIR}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+uv run python -u scripts/diag_trainable_fourier.py \
+  --config "{CONFIG_PATH}" \
+  --ckpt latest \
+  --arch "${ARCH}" \
+  --output-subdir "${SUBDIR}" \
+  ${EXTRA}
+
+echo "[$(date '+%F %T')] TFDIAG-{EXP_ID} 完成"

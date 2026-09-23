@@ -1,0 +1,103 @@
+#!/bin/bash
+#SBATCH --job-name=jax_evaldrop_{EXP_ID}
+#SBATCH --output=logs/jax_evaldrop_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_evaldrop_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# What:
+#   實驗2 eval-time sensor dropout robustness sweep。對「單一既訓 ckpt」掃多個
+#   dropout rate（各多 realization），用 scripts/evaluate_exp245.py，輸出到分離
+#   subdir（dropout_p<rate>/metrics.json）。透過 submit_exp.sh 的 TMPL= 覆寫送 r740。
+#
+# Why:
+#   robustness 曲線須在「同一 clean-trained 模型」上掃 dropout（不重訓），
+#   B3 / B0 各自的既訓全-K ckpt 都經同一組 rate → 公平對照。
+#
+# Env（呼叫端設）:
+#   ARCH                 liquid(B3) / vanilla(B0) —— 須與訓練一致（orbax restore + 模型建構）
+#   ARTIFACTS_DIR        ckpt 所在（須與訓練一致，否則讀不到 / 讀錯 ckpt）
+#   DROPOUT_RATES        space-separated（default "0.0 0.1 0.3 0.5"）
+#   DROPOUT_REALIZATIONS 每 rate 的隨機 mask realization 數（default 5；rate=0 自動只跑 1 次）
+#   DROPOUT_SEED         mask base PRNGKey（default 0）
+#   EVAL_TIME_STRIDE     eval 格點（default 2，固定可比；與訓練 time_strides 無關）
+#
+# Usage:
+#   ARCH=liquid ARTIFACTS_DIR=artifacts/kolmogorov/snap_st2_s42 \
+#   TMPL=scripts/slurm/eval_dropout_sweep.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh evaldrop configs/exp_snap_st2_s42.toml
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+ARCH="${ARCH:-liquid}"
+RATES="${DROPOUT_RATES:-0.0 0.1 0.3 0.5}"
+REALS="${DROPOUT_REALIZATIONS:-5}"
+DSEED="${DROPOUT_SEED:-0}"
+STRIDE="${EVAL_TIME_STRIDE:-2}"
+# snapshot-density 全族把訓練 time_strides 當自變數掃 1→20；eval 格點必須固定，
+# 否則 st20 那臂會用比 st1 粗 20 倍的格點評，跨臂不可比。故明示 fixed_grid 而非
+# follow_training——這個偏離是刻意的，理由隨產物進 provenance。
+PROTOCOL="${PROTOCOL:-fixed_grid}"
+PROTOCOL_REASON="${PROTOCOL_REASON:-snapshot-density：訓練 cadence 是自變數，eval 格點固定才可跨臂比較}"
+PROTO_ARGS="--protocol ${PROTOCOL} --protocol-reason ${PROTOCOL_REASON}"
+: "${ARTIFACTS_DIR:?需設 ARTIFACTS_DIR（ckpt 位置，須與訓練一致）}"
+
+echo "======================================================================"
+echo "[JAX-EVALDROP-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  config:        {CONFIG_PATH}"
+echo "  ARCH:          ${ARCH}"
+echo "  ARTIFACTS_DIR: ${ARTIFACTS_DIR}"
+echo "  RATES:         ${RATES}"
+echo "  REALIZATIONS:  ${REALS}   DROPOUT_SEED: ${DSEED}   EVAL_TIME_STRIDE: ${STRIDE}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+# cuDNN preflight（防 venv 漂移白跑整個 sweep）
+uv run python -c "import jax, jax.numpy as jnp; from jax import lax; lax.conv_general_dilated(jnp.ones((1,8,8,1)), jnp.ones((3,3,1,1)), (1,1), 'SAME', dimension_numbers=('NHWC','HWIO','NHWC')).block_until_ready()" \
+  || { echo '[ERR] cuDNN preflight 失敗 → head node 跑 scripts/slurm/setup_gpu_venv.sh 後重送' >&2; exit 5; }
+
+RC=0
+for rate in ${RATES}; do
+  sub="dropout_p${rate}"
+  echo ""
+  echo "=== [evaldrop] rate=${rate}  realizations=${REALS}  → subdir=${sub} ==="
+  # --optimizer 家族須與訓練一致（orbax restore 對 opt_state 嚴格檢查）
+  uv run python -u scripts/evaluate_exp245.py \
+    --config "{CONFIG_PATH}" \
+    --ckpt latest \
+    --arch "${ARCH}" \
+    --optimizer schedule_free \
+    --base_optimizer soap \
+    --soap_precondition_frequency 2 \
+    --artifacts_dir "${ARTIFACTS_DIR}" \
+    ${PROTO_ARGS} \
+    --time-stride "${STRIDE}" \
+    --output-subdir "${sub}" \
+    --sensor_dropout_rate "${rate}" \
+    --dropout_realizations "${REALS}" \
+    --dropout_seed "${DSEED}" \
+    --no-plot \
+    || { echo "[WARN] rate=${rate} eval 失敗 rc=$?（其餘 rate 續跑）"; RC=1; }
+done
+
+echo ""
+echo "[evaldrop] sweep done  overall_rc=${RC}"
+exit "${RC}"

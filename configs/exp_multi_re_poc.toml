@@ -1,0 +1,99 @@
+# configs/exp_multi_re_poc.toml — Wave 5 Multi-Re POC（Re=1000 + Re=10000）
+#
+# What:
+#   2-Re training POC: 從 PyTorch pi-lnn borrow Re=1000 sensor + DNS，加上 Re=10000
+#   的既有 LES_T50 sensor，driver 把兩個 Re 對齊到同一 (T=51, K=100) shape，
+#   並在 jit step_fn 每步 random sample re_idx。
+#
+# Why:
+#   Wave 4 之前 multi_re 模式因 closure-capture bug 而 silent fail（看似多 Re 訓練
+#   但 jit graph 內 sensor/nu/norm_stats 永遠是 d0）；Wave 5 把這些改為 step_fn 的
+#   runtime args，本 config 是新 pipeline 的最小可驗證 case。
+#
+# Multi-Re 取樣策略：
+#   - random sample per step（不是 round-robin）
+#   - Re=1000 與 Re=10000 各占 50%
+#   - GradNorm / AL 用「當前 Re」算，不做跨 Re EMA mixing
+#
+# 模型架構承襲 exp_245；唯一新增是 Re FiLM（已落地）會在訓練中啟動 multiplicative 分支。
+# Eval 只跑 d0 (Re=1000) DNS；multi-Re sweep 留給後續 evaluate_multi_re。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+# Re=1000 NPZ 原始 T=101 → time_stride=2 得 T=51
+# Re=10000 NPZ 原始 T=201 → time_stride=4 得 T=51
+# 兩者 dt 都對齊到 0.1，span t ∈ [0, 5]
+sensor_jsons = [
+  "data/kolmogorov_sensors/re1000/sensors_qrpivot_K100_N128_t0-5.json",
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re1000/sensors_qrpivot_K100_N128_t0-5_dns_values.npz",
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_ds4.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy",
+]
+re_values = [1000.0, 10000.0]
+time_strides = [2, 4]   # Wave 5：per-Re time_stride 對齊 T=51
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構（承襲 exp_245 B3）──────────────────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定（POC：smoke test 預設 200 step，可 CLI override）──────
+iterations = 200
+num_physics_points = 512
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 100
+seed = 42
+artifacts_dir = "artifacts/kolmogorov/multi_re_poc"
+
+# ── GradNorm + AL ────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 100
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+al_update_freq = 50
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false
+
+# 2026-08-03（架構候選 H）：以下四鍵原本省略，落到 schema 預設。
+# 寫的就是它們原本拿到的值（實測 legacy_config 解析結果），行為不變——
+# 目的是讓「schema 預設」不再是任何 config 的實際來源，那個預設才動得了。
+lr_warmup_steps = 0
+lr_decay_steps = 0
+lr_decay_gamma = 1.0
+

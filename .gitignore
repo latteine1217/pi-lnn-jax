@@ -1,0 +1,32 @@
+# --- Python / tooling ---
+__pycache__/
+*.pkl
+.venv/
+.pytest_cache/
+.ruff_cache/
+# XLA persistent compilation cache (pure cache; deleting it only costs time)
+.jax_cache/
+
+# --- Run outputs ---
+# Evaluation artifacts and one-off eval products
+artifacts/
+# Slurm runtime outputs: the sbatch template and submit script are tracked,
+# the sed-substituted sbatch files and their logs are not.
+logs/
+# Benchmark JSON outputs
+bench/results/
+
+# --- Large field binaries (> 100 MB) ---
+# DNS / LES full fields and cylinder sensor shards. Located at runtime via
+# PILNJAX_DATA_ROOT so that several checkouts can share one copy.
+data/dns/
+data/channel_dns/
+data/les/
+data/cylinder_sensors/
+# Cylinder reconstruction outputs (one-off eval products)
+data/cylinder_re1781*.npz
+data/cylinder_v1.npz
+data/controlled_v2.npz
+
+# --- macOS ---
+.DS_Store

@@ -1,0 +1,70 @@
+# configs/exp_controlled_cyl_v2_uinf033.toml — LOO: u_inf 換回 v1 錯值 0.33（其餘同 MOVING baseline）
+#
+# What: RealPDEBench controlled cylinder（sim_params=[Re,control_freq]，例 [1781, 0.7]）的
+#       sparse-sensor + PDE-residual 重建。case=controlled_cylinder 啟用 moving no-slip
+#       （時變 mask + 剛體壁速 BC）＋ physics 打折（physics_weight_scale）。判據用 KE。
+# Why : 2D 相容性 gate r=0.148（marginal，spanwise leakage ~15%）→ physics 為弱/有偏約束，
+#       重建主力是 sensor data。作為論文方向 B 的「光譜中間點」（cylinder 強 → controlled 打折 →
+#       foil/fsi 崩）。詳見 docs/controlled-cylinder-continuation.md。
+#
+# 前置：先用 scripts/dump_controlled_cylinder_v2.py 產出 data/controlled_v2.npz
+#       （含反推的 osc_amp/osc_phase/osc_freq/osc_axis 與 base_center/body_radius）。
+
+case = "controlled_cylinder"
+controlled_data_npz = "data/controlled_v2.npz"
+
+# ── moving-BC ablation：實驗組 ──
+# 1.0 → 用 npz 內從場「實測」的振幅（amp=0.11753 normalized, freq=0.1504, r2=0.880）。
+# 對照組 exp_controlled_cyl_v2_static.toml 只把此值設 0.0（body 靜止、壁速=0）。
+controlled_amp_scale = 1.0
+
+# physics 打折：marginal 2D → PDE residual（ns_u/ns_v）與 continuity(AL) 乘 0.3；data/bc 不受影響
+physics_weight_scale = 0.3
+
+# 註：controlled npz 未存 bc_inflow_u → u_inf 走 fallback 0.33（見 train_cylinder.py）。
+#     若已知該 rig 實際入流速度，設 cylinder_u_inf 覆蓋（影響 nu、inflow BC 與 moving 壁速 normalize）。
+# cylinder_u_inf = 0.33
+
+# physics（弱）：collocation 點數；GradNorm 從 0.01 起調 physics 權重
+num_physics_points = 64
+gradnorm_freq = 25
+gradnorm_ema_momentum = 0.9
+use_physics_denormalization = true
+
+# ── 低 Re GradNorm 失衡的修正（v1 尾流崩壞根因）──
+# w_raw = mean_G/(G_i+1e-5·mean_G)，以 data 為基準正規化。低 Re（此處 Re=1781）時 physics
+# 梯度遠小於 data → physics 權重被推到 300-360×（v1 postmortem）→ physics 壓垮重建。
+# cap=1.0：physics 權重不得超過 data(=1)，仍允許 GradNorm 在 [min, 1] 內自適應。
+# 註：此 key 在 train_cylinder.py 接線修好前是 silent no-op。
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 1.0
+
+# 模型建構值不在這裡設。cylinder pipeline 讀 model_kwargs **零次**——它走
+# pi_lnn_jax/pipeline/cylinder/assembly.py 的 CFG 顯式建構（tests/
+# test_schema_default_traps.py 的 docstring 也記著這件事）。本檔一度寫著
+# `use_rwf = false` / `cfc_input_dependent_tau = false` 並自稱 legacy 鎖定，
+# 那兩行從來沒有生效過：實際建構值是 assembly.CFG 的 True/True/0.5。
+# 要改 cylinder 的模型規格，改 assembly.CFG，並同步 tests/test_cylinder_assembly.py
+# 的 EXPECTED_CFG 與 EXPECTED_N_PARAMS。
+
+# soft wall BC（固定權重，置於 GradNorm 之外）；controlled 走 moving no-slip 分支
+bc_weight = 0.1
+bc_body_weight = 2.0
+bc_n = 128
+
+# 時間課程：t_early 強錨初始條件 + time-marching 漸進展開時間窗
+t_early_weight = 10.0
+t_early_threshold = 0.05
+time_marching = true
+time_marching_start = 0.5
+time_marching_warmup = 0.3
+
+# optimizer / 訓練長度
+learning_rate = 1e-3
+iterations = 10000
+seed = 42
+
+# ── leave-one-out：u_inf ──
+# 實測 inflow=0.0701；v1 用錯的 fallback 0.33。設此值 → u_inf=0.33（覆蓋 npz bc_inflow_u），
+# nu=u_inf·D/Re 差 4.7×，且 inflow BC 目標被釘到 0.33。與 baseline 唯一差異就是這個。
+cylinder_u_inf = 0.33

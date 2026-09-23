@@ -1,0 +1,61 @@
+{
+  "K": 10,
+  "resolution": "128x128",
+  "spatial_downsample_res": "128x128",
+  "spatial_downsample_stride": 1,
+  "method": "farthest_point_sampling_periodic",
+  "features": [],
+  "time_stride": 1,
+  "time_range": [
+    0.0,
+    17.200000762939453
+  ],
+  "time_steps": 101,
+  "selected_coordinates": [
+    [
+      0.0859375,
+      0.421875
+    ],
+    [
+      0.5859375,
+      0.921875
+    ],
+    [
+      0.0859375,
+      0.921875
+    ],
+    [
+      0.5859375,
+      0.421875
+    ],
+    [
+      0.3359375,
+      0.171875
+    ],
+    [
+      0.3359375,
+      0.671875
+    ],
+    [
+      0.8359375,
+      0.171875
+    ],
+    [
+      0.8359375,
+      0.671875
+    ],
+    [
+      0.0859375,
+      0.171875
+    ],
+    [
+      0.0859375,
+      0.671875
+    ]
+  ],
+  "source_file": "data/dns/cross_re/kolmogorov_dns_Re500_N128_T17p28_matched.npy",
+  "seed": 42,
+  "sensor_dt": 0.1720000058412552,
+  "sensor_time_points": 101,
+  "engineering_pipeline_note": "DNS-free coverage-optimal placement (FPS, no LES); sensor values from DNS."
+}

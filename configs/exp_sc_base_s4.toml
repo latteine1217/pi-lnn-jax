@@ -1,0 +1,92 @@
+# scalar vs vector attention 的 multi-seed 判別（Phase A0 續行）。
+# 從 exp_rwfoff_s1.toml（T20 系列 base 臂）逐字複製，只改 attention_kind vector→scalar。
+# relpos_bias_norm 明寫 "layernorm"（等於 schema 預設，不改行為）——這一批的意義建立在
+# 「與 rwfoff 只差 attention_kind」上，依賴會變的預設本身就是脆弱性（見 900147d）。
+#
+# 起因：seed 1 探路意外顯示 scalar 優於 vector（7.010% vs 7.362%，同 seed，約 6.6 個
+# seed sd；band_rel_err_mid −19%）。方向與預期相反——proposal §6 原本擔心的是 scalar
+# 大幅劣於 vector。T20 系列 base 選 vector，而論文 B3 主結果用 scalar，兩者從未在同一
+# base 上比過；若此方向在 n=4 下站得住，近期所有架構 ablation 的共同 base 選錯了。
+#
+# ⚠️ n=1 不足以宣稱效果。0.35 pp 這個量級曾在 4 seed 下翻轉過（cylinder liquid-τ）。
+# 對照臂 rwfoff_s{1..4} 已有 n=4（7.381 ± 0.053），配對比較。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+sensor_jsons = [
+  "data/sensors/re10000/sensors_les_qr_K100_N256_t0-20_si128.json",
+]
+re_values = [10000.0]
+time_strides = [8]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T20_dt1p95e4_si128_seed42.npy",
+]
+observed_sensor_channels = ["u", "v"]
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── 模型架構（B3 + vector attention, no W_O）──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 20.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "scalar"
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 4
+artifacts_dir = "artifacts/kolmogorov/sc_base_s4"
+
+# ── LR schedule ────────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ───────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+
+# legacy 鎖定：schema 預設已改 use_rwf/cfc_input_dependent_tau=on；此 Re=10000 baseline 明示
+# false 保留舊 param-tree（且維持 vs exp_re10000_T20_les_qr_v3_rwf 的 RWF A/B 對照）
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ───────────────────────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+al_update_freq = 100
+al_warmup_steps = 5000
+
+# ── SOAP betas ────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]
+
+# ── Phase A 探路：僅 vector→scalar，relpos bias 維持既有的 no-op ──
+relpos_bias_norm = "layernorm"

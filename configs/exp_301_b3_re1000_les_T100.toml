@@ -1,0 +1,114 @@
+# configs/exp_301_b3_re1000_les_T100.toml — Re=10³ 以主線協定重跑（JAX）
+#
+# What:
+#   EXP-301 — B3 (full architecture) + LES-derived DNS-free 佈點 + Re=1000，single seed=42。
+#   逐行派生自 configs/exp_245_b3_les_T50.toml，僅改動 Re 相關四項（見下）。
+#
+# Why:
+#   論文 §6.4 tab:re1e6 的 Re=1000 欄（KE MAPE 9.61%）繼承自 pi-lnn legacy EXP-230：
+#   d_model=64 / 5k steps / 無 AL / 無 GradNorm / num_physics_points=32 / 用了現已禁用的
+#   resume_checkpoint。該數字與主線不可並列——9.61% 比 Re=10⁴ 主線的 5.73% 差，並非
+#   「低 Re 較難」，而是不同世代的方法。本 repo 先前無任何 Re=1000 config 或 artifact。
+#   本檔讓 Re=1000 落在與 EXP-245 相同的訓練協定上，取得可並列的數字。
+#   （對應 pi-lnn 的 exp_301_b3_re1000_les_T100.toml，但 schema 不同故不可直接移植。）
+#
+# 派生 from EXP-245，唯一改動四項：
+#   - sensor_jsons / sensor_npzs → Re=1000 LES-pivot（LES N=128 T=100 standalone）
+#     EXP-245 主線用 LES_N256_T50；Re=1000 先前只有 DNS QR-pivot oracle 佈點，
+#     沿用會重蹈「佈點來源不符」，故改用同為 DNS-free 的 LES-derived 佈點。
+#   - dns_paths / re_values      → Re=1000 DNS
+#   - artifacts_dir              → exp301
+#
+# 殘留差異（非本 config 可消除，判讀與寫入論文時必須揭露）:
+#   - 參考 DNS 解析度：Re=1000 為 N=128 / 101 frames（Δt_s=0.05）；
+#     主線 Re=10⁴ 為 N=256 / 201 frames（Δt_s=0.025）。方法協定對齊，reference 不同。
+#   - single seed=42。跨-Re claim 若要進論文需 multi-seed（單 seed 落點僅供先看方向）。
+#
+# Sensor axis convention:
+#   已驗（EXP-101 災難根因 guard 同一不變式，K=100 全數）：
+#   correct [x_idx, y_idx] max abs err 0.0 vs swapped [y_idx, x_idx] 1.924。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+# Path 相對本專案 root；pi_lnn_jax/data.py:_resolve_data_path 會 fallback 到 PILNJAX_DATA_ROOT。
+sensor_jsons = [
+  "data/kolmogorov_sensors/re1000/sensors_qrpivot_qrpivot_K100_N128_t0-5_les_n128_T100standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re1000/sensors_qrpivot_qrpivot_K100_N128_t0-5_les_n128_T100standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_ds4.npy"]
+re_values = [1000.0]
+observed_sensor_channels = ["u", "v"]
+
+# time_strides: 必須明示 [1]，不可吃預設 2。
+#   Re=1000 sensor 是 101 frames @ Δt=0.05；預設 stride=2 會餵 51 frames @ Δt=0.1，
+#   即主線一半的時間解析度。EXP-245 是 201 frames @ Δt=0.025，stride=2 後為
+#   101 frames @ Δt=0.05 —— 故本檔 stride=1 才與主線的 sensor 串流逐格對齊
+#   （同為 101 frames @ Δt=0.05）。這是兩支 DNS 原始取樣率不同造成的，不設此鍵
+#   就會靜默引入新的協定不符。
+time_strides = [1]
+
+# ── 模型架構 (B3 full, 對齊 EXP-245) ─────────────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+artifacts_dir = "artifacts/kolmogorov/exp301_b3_re1000_les_T100_jax_20k"
+
+# ── LR schedule（對齊 EXP-245）───────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm（對齊 EXP-245）──────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+
+# legacy 鎖定：與 EXP-245 主 baseline 同步，明示 false 以維持可比性
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ────────────────────────────────────────────────────
+al_update_freq = 100
+
+# ── SOAP betas ─────────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]
+
+# ── Augmented Lagrangian for continuity ──────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0

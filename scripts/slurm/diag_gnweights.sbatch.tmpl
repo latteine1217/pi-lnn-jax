@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=jax_gnw_{EXP_ID}
+#SBATCH --output=logs/jax_gnw_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_gnw_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# GradNorm 權重終值（全精度），逐 config
+# 回答的問題：04_method.tex 那句「physics 項的權重由 floor 而非平衡規則決定」
+#   在哪些 K 上成立。訓練 log 只印兩位小數，分不出 0.050（被 clamp）與 0.054（平衡點）。
+#   判別法：被 clamp 的權重精確等於 gradnorm_min_weight。
+#
+# 為什麼要 GPU：ckpt 是 GPU 寫的，orbax 在 head node 的 CPU JAX 上推不出 sharding。
+#
+# 環境變數：
+#   CONFIGS     空白分隔的 config 路徑清單。給了就忽略 {CONFIG_PATH}。
+#   DIAG_EXTRA  原樣附加到診斷腳本的旗標（例：--cont_gradnorm）。
+#               未設就不加；訓練時用了 --cont_gradnorm 的 run 一定要帶，
+#               否則 restore 的權重長度守衛會擋下（那是刻意的）。
+#
+# 用法：
+#   CONFIGS="configs/exp_pv_les_s1.toml configs/exp_pv_les_s42.toml" \
+#   TMPL=scripts/slurm/diag_gnweights.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh gnw configs/exp_pv_les_s42.toml
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+LIST="${CONFIGS:-{CONFIG_PATH}}"
+echo "======================================================================"
+echo "[JAX-GNW-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  configs: ${LIST}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+
+FAILED=""
+for cfg in ${LIST}; do
+  echo ""; echo "──────── ${cfg} ────────"
+  uv run python -u scripts/diag_grad_accum_al_bias.py \
+    --config "${cfg}" --resume latest --weights-only ${DIAG_EXTRA:-} \
+    || { echo "[WARN] ${cfg} 失敗 (rc=$?)"; FAILED="${FAILED} ${cfg}"; }
+done
+
+echo ""; echo "[$(date '+%F %T')] GNW-{EXP_ID} 完成；失敗：${FAILED:-（無）}"

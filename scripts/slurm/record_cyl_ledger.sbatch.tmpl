@@ -1,0 +1,144 @@
+#!/bin/bash
+#SBATCH --job-name=jax_cylledger_{EXP_ID}
+#SBATCH --output=logs/jax_cylledger_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_cylledger_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#
+# What:
+#   錄製 cylinder 的 golden ledger fixture（wave 2 驗收層 A 的基準軌跡）。
+#   三份，覆蓋 spec §7 的兩條**正交**分支：
+#     c1  case=cylinder            time_marching=false  → jax.random.choice(k3) + sample_wall_bc
+#     c2  case=cylinder            time_marching=true   → np_rng.choice（第二條 NumPy 流）；k3 抽出不用
+#     c3  case=controlled_cylinder time_marching=true   → sample_wall_bc_moving + fluid_mask_moving
+#
+#   c1/c2 同 config 家族同 seed 只差 time_marching，共同釘住 §5.3 的 k3 無條件消耗。
+#
+# Why CPU（無 --gres=gpu:1）:
+#   wave 1 已證 GPU 上同碼兩跑 params_digest 就不同（job 4729），故 bit-identical
+#   判準只在 CPU 成立。錄製與日後對拍都走 CPU，把 GPU 留給訓練 job。
+#
+# 已知踩過的坑（wave 1 實測，勿重蹈）:
+#   - orbax 對已存在 step 丟 StepAlreadyExistsError → 錄製前必須清空 artifacts 子目錄。
+#     （cylinder 目前無 ckpt，此處清理是為了 rng_ledger.json 不殘留舊值誤導判讀。）
+#   - compute node r740 沒有 rg（head node 有）→ 一律用 grep。
+#   - 每個 worktree 的 .venv 獨立；pytest 不在 pyproject，需另外 uv pip install。
+#   - cylinder 用原始 np.load(相對CWD路徑)，**不走** _resolve_data_path
+#     → 資料必須實際出現在 CWD 的 data/ 下（本檔以 symlink 供應，不複製 7MB×2）。
+#
+# Usage（lab-server head node，cylinder worktree）:
+#   CYL_DATA_SRC=$HOME/pi-lnn-jax/data \
+#   TMPL=scripts/slurm/record_cyl_ledger.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh cylledger configs/exp_cyl_cexp002_notm.toml
+
+set -euo pipefail
+
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax-cyl}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export UV_OFFLINE=1
+export JAX_PLATFORMS=cpu
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先跑 uv sync" >&2; exit 3; }
+
+CYL_DATA_SRC="${CYL_DATA_SRC:-$HOME/pi-lnn-jax/data}"
+
+echo "======================================================================"
+echo "[CYL-LEDGER-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  repo:          $(pwd)"
+echo "  HEAD:          $(git rev-parse --short HEAD)"
+echo "  CYL_DATA_SRC:  ${CYL_DATA_SRC}"
+echo "  JAX_PLATFORMS: ${JAX_PLATFORMS}"
+echo "======================================================================"
+
+# ─── 資料就位（symlink，不複製）────────────────────────────────────────
+mkdir -p data
+for f in cylinder_v1.npz controlled_v2.npz; do
+  if [ ! -e "data/$f" ]; then
+    [ -f "$CYL_DATA_SRC/$f" ] || { echo "[ERR] 來源缺 $CYL_DATA_SRC/$f" >&2; exit 4; }
+    ln -s "$CYL_DATA_SRC/$f" "data/$f"
+  fi
+done
+
+# ─── preflight：三份 config 的 npz 必須真的存在 ─────────────────────────
+# 注意：cylinder 走原始 np.load，找不到會在載入時才炸——排隊成本比 preflight 貴得多。
+# 且與 Kolmogorov 不同，這裡不能用 _resolve_data_path（cylinder 根本不呼叫它）。
+echo "[preflight] 檢查三份 config 的 npz..."
+uv run python - <<'PREFLIGHT' || { echo "[ERR] 資料 preflight 失敗" >&2; exit 5; }
+import pathlib, sys
+from pi_lnn_jax.config import load_config
+missing = []
+for name, key in [("configs/exp_cyl_cexp002_notm.toml", "cylinder_data_npz"),
+                  ("configs/exp_cyl_cexp002.toml", "cylinder_data_npz"),
+                  ("configs/exp_controlled_cyl_v2.toml", "controlled_data_npz")]:
+    p = load_config(name)["data_kwargs"].get(key)
+    if not p:
+        missing.append(f"  {name}: data_kwargs.{key} 未設定"); continue
+    if not pathlib.Path(p).exists():
+        missing.append(f"  {name}: {p} 不存在（相對 CWD={pathlib.Path.cwd()}）")
+if missing:
+    print("[preflight] 缺檔：", file=sys.stderr); print("\n".join(missing), file=sys.stderr); sys.exit(1)
+print("[preflight] 三份 config 的 npz 都在")
+PREFLIGHT
+
+# ─── 清空輸出目錄 ───────────────────────────────────────────────────────
+for d in c1 c2 c3; do
+  target="artifacts/cylledger/$d"
+  case "$target" in
+    artifacts/cylledger/c[123]) rm -rf "$target" ;;
+    *) echo "[ERR] 拒絕刪除非預期路徑：$target" >&2; exit 6 ;;
+  esac
+done
+echo "[cleanup] artifacts/cylledger/{c1,c2,c3} 已清空"
+
+# ─── 錄製 ───────────────────────────────────────────────────────────────
+export PILNN_RNG_LEDGER=1
+set +e
+FAIL=0
+
+# train_cylinder.py 沒有 --artifacts_dir 旗標，ledger 落點是
+#   Path(tk.get("artifacts_dir", "artifacts")) / "rng_ledger.json"
+# 而三份 config **都未設 artifacts_dir**，故三次都寫到同一個 artifacts/rng_ledger.json。
+# → 必須每跑完一份就立刻搬走。若照「跑完三份再收集」，會拿到三份都是最後一次的
+#   內容，而且看起來一切正常——這種假 fixture 會讓後續所有比對失去意義。
+run_case () {   # $1=tag  $2=config
+  echo ""
+  echo "── $1：$2 ──"
+  rm -f artifacts/rng_ledger.json          # 確保搬走的是本次產出，不是殘留
+  uv run python -u train_cylinder.py --config "$2" \
+      --steps 20 --seed 42 --allow-cpu \
+      2>&1 | tail -5
+  local rc=${PIPESTATUS[0]}
+  if [ "$rc" != "0" ]; then
+    echo "[$1] rc=${rc}（訓練失敗）"; FAIL=1; return 0
+  fi
+  if [ ! -f artifacts/rng_ledger.json ]; then
+    echo "[$1] rc=0 但 artifacts/rng_ledger.json 未產出（PILNN_RNG_LEDGER 沒生效？）" >&2
+    FAIL=1; return 0
+  fi
+  mkdir -p "artifacts/cylledger/$1"
+  mv artifacts/rng_ledger.json "artifacts/cylledger/$1/rng_ledger.json"
+  echo "[$1] rc=0 → artifacts/cylledger/$1/rng_ledger.json"
+  return 0
+}
+
+run_case c1 configs/exp_cyl_cexp002_notm.toml
+run_case c2 configs/exp_cyl_cexp002.toml
+run_case c3 configs/exp_controlled_cyl_v2.toml
+set -e
+
+echo ""
+echo "======================================================================"
+echo "[CYL-LEDGER-{EXP_ID}] 結束  FAIL=${FAIL}"
+for d in c1 c2 c3; do
+  led="artifacts/cylledger/$d/rng_ledger.json"
+  if [ -f "$led" ]; then echo "  $d: $led OK"; else echo "  $d: $led 缺失"; FAIL=1; fi
+done
+echo "======================================================================"
+exit "$FAIL"

@@ -1,0 +1,149 @@
+# configs/exp_stat_b3_a035_trans_s42.toml — 阻尼流場的「暫態窗」對照臂
+#
+# 存在理由：exp_stat_b3_a035_s42（穩態窗 [20,25]）與 main5（無阻尼、暫態窗）的比較
+# 有兩個因子同時變——流場物理、以及窗坐落在暫態還是穩態。本臂補上缺的那格：
+#
+#   |            | 無阻尼流場 | 阻尼流場 |
+#   | 暫態窗[0,5] | main5     | **本檔** |
+#   | 穩態窗      | 不存在     | exp_stat_b3_a035_s42 |
+#
+# 「無阻尼 + 穩態」在構造上不存在——那正是加阻尼的理由。
+# 本檔 vs exp_stat_b3_a035_s42：**同一份 DNS 軌跡、同一組 QR sensor 位置**，
+# 只差取值的時間窗 → 乾淨隔離「窗的位置」。
+#
+# 可證偽的預測：若誤差隨時間單調下降的形狀是「窗坐落在衰減暫態」造成的，
+# 本臂應重現該形狀（儘管有阻尼）。實測本窗 enstrophy 74.5 ± 24.4，
+# 散布是穩態窗 [10,15] 的 5 倍，確為暫態。若形狀未重現，則機制解釋有誤。
+#
+# 其餘與 exp_stat_b3_a035_s42 完全相同（含兩項已知限制，見該檔檔頭）。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+# Path 相對本專案 root（大檔走 PILNJAX_DATA_ROOT），
+# pi_lnn_jax/data.py:load_sensors_from_path 會自動 prefix。
+sensor_jsons = [
+  "data/kolmogorov_sensors/drag_a035/sensors_qrpivot_K100_N256_drag_a035_trans00-05_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/drag_a035/sensors_qrpivot_K100_N256_drag_a035_trans00-05_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_drag_N256_kf4_A1p0_a035_T5_wintrans00-05_seed42.npy"]
+re_values = [10000.0]
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構 (B3 full, 對齊 pi-lnn EXP-245) ──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+# ⚠️ 這兩個鍵是 DEPRECATED/inert（config.py 該處註解）——**沒有任何 code 讀它們**。
+# 仍設成正確值以免誤導讀者；真正生效的是下方 forcing_*_init。
+kolmogorov_k_f = 4.0
+kolmogorov_A = 1.0
+
+# ── 生效的物理常數（ForcingPrior + residual）──────────────────────────
+# exp_245 未設這兩個鍵，吃 schema 預設 0.1/2.0——那與舊流場「巧合一致」。
+# 本檔的流場是 A=1.0/k_f=4，**不設就會拿錯的 forcing 去算 residual**。
+forcing_A_init = 1.0
+forcing_k_f_init = 4.0
+learn_forcing_A = false      # 固定：這是生成資料時的已知量，不是待辨識量
+learn_forcing_k_f = false
+# 線性阻尼進 NS residual 的 -alpha*u 項。必須等於生成 DNS 時的 drag_alpha，
+# 否則 physics loss 會把模型推離真解。此值也進 model_fingerprint（§7.2），
+# eval 端錯配會被閘門擋下。
+drag_alpha = 0.35
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+# physics_loss_weight = 1.0 修雙重乘法 bug（effective = 1.0 × GradNorm_weight，對齊 pi-lnn）
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0       # 對齊 pi-lnn：t < T×threshold 的 sensor 錨定強化
+t_early_threshold = 0.05    # 對齊 pi-lnn：前 5% 時間（0.0-0.25s）upweight 10×
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+# sensor mini-batch：每 step decode 2000/10100 sensor query 點（encode 仍全量）。
+# 5000-step A/B 驗證：loss plateau 比 full 差 <5%，速度 1.58×（280→177ms/step）。
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+# ⚠️ 不得沿用 exp_245 的 artifacts_dir——那會覆寫 B3 主基線的產物。
+# 這個坑已記在 knowledge/experiments/kolmogorov-pinn-k100-rerun-2026-08-29.md：
+# 「不從 exp_245_pinn_large.toml 直接衍生：該檔的 artifacts_dir 與 B3 相同，
+#   沿用會覆寫 B3 的產物」。本檔自 exp_245_b3_les_T50 複製時漏改，已修正。
+artifacts_dir = "artifacts/kolmogorov/exp_stat_b3_a035_trans_s42"
+
+# ── LR schedule（對齊 pi-lnn EXP-245）─────────────────────────────────
+# train_kolmogorov.py 已 wire 到 build_optimizer；schedule_free 模式下 schedule
+# 作為 schedule_free 的 learning_rate 參數，inner adam 走 unit lr。
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm（對齊 pi-lnn freq=1000 + init_weights + ema_momentum）─────
+# JAX TRAIN_SCHEMA 鍵名是 gradnorm_freq；pi-lnn 是 gradnorm_update_freq（同義）。
+# 注意：AL update 在 JAX 共用此 freq；pi-lnn al_update_freq=100 無法獨立設定。
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05    # safety floor，防止 G_data→0 後 physics 完全被壓
+
+# legacy 鎖定：schema 預設已改 use_rwf/cfc_input_dependent_tau=on；此論文主 baseline 明示
+# false 保留舊架構與既有 checkpoint 可重現（且維持 vs exp_245_b3_les_T50_liquidtau 的 on/off 對照）
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]   # 對齊 pi-lnn；舊版寫死 [1, .01, .01, .01]
+gradnorm_ema_momentum = 0.9                          # 對齊 pi-lnn；舊版寫死 0.5
+
+# ── Augmented Lagrangian ────────────────────────────────────────────────────
+al_update_freq = 100     # 對齊 pi-lnn（從 gradnorm_freq=1000 分離，更頻繁更新 lambda）
+
+# ── SOAP betas ─────────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]   # 對齊 pi-lnn；SOAP_JAX 預設 [0.95, 0.95] → sensor 收斂太快
+
+# ── Augmented Lagrangian for continuity ──────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# ─────────────────────────────────────────────────────────────────────
+# §JAX-TODO — pi-lnn EXP-245 已開但 JAX POC 尚未實作的 key（不放進 [train]）
+# ─────────────────────────────────────────────────────────────────────
+# t_early_weight = 10.0
+# t_early_threshold = 0.05
+# physics_collocation_strategy = "random"
+# lr_schedule = "soap"                  # 改用 CLI: --optimizer schedule_free
+# use_schedule_free = true              # 改用 CLI: --optimizer schedule_free
+# soap_betas = [0.9, 0.999]
+# soap_precondition_frequency = 2
+# (lr_warmup_steps / lr_decay_steps / lr_decay_gamma / min_learning_rate
+#  已從 JAX-TODO 移出，現於 [train] 區實裝)
+# soap_use_step_decay = true
+# (gradnorm_ema_momentum / gradnorm_init_weights 已從 JAX-TODO 移出，現於 [train] 區實裝)
+# gradnorm_tasks = ["data", "ns_u", "ns_v", "cont"]
+# al_constraints = ["cont"]
+# al_init_lambda = 0.0                  # train_kolmogorov.py:657 寫死 0.0（一致）
+# al_update_freq = 100                  # JAX 共用 gradnorm_freq
+# al_ema_momentum = 0.5
+# al_allow_cont_in_gradnorm = true
+# time_marching = true                  # 改用 CLI: --use_time_marching
+# time_marching_start = 0.5             # 改用 CLI: --tm_start_frac 0.5
+# time_marching_warmup = 0.3            # ≈ pi-lnn 比例制；JAX 用絕對步數
+# time_marching_warmup_steps = 2000     # 改用 CLI: --tm_warmup_steps 2000
+# use_sensor_physics = false
+# device = "cuda"                       # 改用 env JAX_PLATFORMS=cuda

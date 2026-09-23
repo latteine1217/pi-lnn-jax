@@ -1,0 +1,89 @@
+# configs/_ledger_f2.toml — Ledger fixture 專用 config（非實驗記錄；不進 claims-ledger）
+#
+# What:
+#   Task 3（訓練管線重構前）錄製 golden RNG ledger 用的 f2 fixture。目的是把
+#   train_kolmogorov.py 主迴圈五個條件式 RNG 消費點中的三個打開：
+#     - multi-Re 選 Re index（n_datasets > 1，需搭配 CLI --multi_re）
+#     - 連續-Re 物理正則抽 re_norm'（use_continuous_re_physics = true）
+#     - sensor query mini-batch 抽 sensor_idx（num_sensor_query_points > 0）
+#   sensor dropout 由 CLI --sensor_dropout_rate 開（TRAIN_SCHEMA 無此 key，純 CLI-only）。
+#   RAR 保持關閉（不傳 --rar_freq，見 f3）。步數與模型規模壓到最小，只求覆蓋分支、
+#   不求收斂或數值品質。
+#
+# Why 三份 fixture：見 .superpowers/sdd/task-3-brief.md ——spec §5.4 規定五個 RNG
+#   消費點各自帶條件，單一 config 只走一條路徑，證不了條件性。f2 是「全開」那一份。
+#
+# 底線前綴（_ledger_f2）表示這不是一份實驗紀錄，只是 diagnostic ledger 用的固定小 config。
+
+[model]
+# 縮到最小（比照 configs/mini_smoke.toml 的 M3 smoke 規模），只求能跑、不求收斂
+d_model = 32
+d_time = 8
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 1
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 32
+operator_rank = 32
+domain_length = 1.0
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+
+[train]
+iterations = 20
+seed = 42
+num_physics_points = 16
+num_sensor_query_points = 64      # > 0 → 走 sensor_idx 分支（rng_collo 的 sub_sq）
+use_continuous_re_physics = true  # → 走 rng_crp 分支
+continuous_re_physics_weight = 1.0
+gradnorm_freq = 5
+use_gradnorm = true
+al_update_freq = 4
+al_warmup_steps = 2
+checkpoint_period = 10
+
+
+# 2026-08-03（架構候選 H）：以下四鍵原本省略，落到 schema 預設。
+# 寫的就是它們原本拿到的值（實測 legacy_config 解析結果），行為不變——
+# 目的是讓「schema 預設」不再是任何 config 的實際來源，那個預設才動得了。
+lr_warmup_steps = 0
+lr_decay_steps = 0
+lr_decay_gamma = 1.0
+t_early_weight = 1.0
+
+[data]
+# 逐字複製自 configs/eval_multi_re_train5_crp.toml 的 data 相關 keys（re_values /
+# sensor_jsons / dns_paths / re_norm_scale / observed_sensor_channels）——不憑印象填
+# 路徑。8 個 Re 才能穩定保證 --multi_re 真的走到 rng_re 分支（n_datasets>1，20 步
+# 隨機選 index 幾乎不可能全落在同一個 Re 上）。
+re_values = [1000.0, 3000.0, 5000.0, 8000.0, 10000.0, 30000.0, 50000.0, 1000000.0]
+sensor_jsons = [
+  "data/sensors/sensors_qrpivot_K100_Re1000_N128_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re3000_N192_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re5000_N256_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re8000_N256_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re10000_N256_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re30000_N512_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re50000_N640_t0-5.json",
+  "data/sensors/sensors_qrpivot_K100_Re1000000_N1280_t0-5.json",
+]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_dt3p91e4_si64_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re3000_N192_T5_dt2p60e4_si96_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re5000_N256_T5_dt1p95e4_si128_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re8000_N256_T5_dt1p95e4_si128_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re30000_N512_T5_dt9p51e5_si263_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re50000_N640_T5_dt7p84e5_si319_seed42.npy",
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000000_N1280_T5_dt3p32e5_si752_seed42.npy",
+]
+re_norm_scale = 1000000.0
+observed_sensor_channels = ["u", "v"]
+
+# 2026-08-29：明寫 use_rwf。本檔是指紋 fixture 的重建來源，若讓它吃 schema
+# 預設，任何預設變更都會讓 test_fingerprint_recording 假紅——而該測試比對的是
+# 「訓練當時記錄的指紋」vs「eval 端重建的指紋」，兩側必須指向同一個建構值。
+# fixture 錄於 use_rwf=False 的年代，故此處明寫 false 以保持一致。
+use_rwf = false

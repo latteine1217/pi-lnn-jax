@@ -1,0 +1,169 @@
+# configs/exp_530s1_b3_extrap_T10.toml — EXP-530 的 seed 1（雜訊尺用）
+#
+# What: 與 exp_530_b3_extrap_T10.toml **只差 seed 與 artifacts_dir**。
+# Why:  外推段的判準（useful_horizon、τ=5 誤差）目前只有單 seed，沒有散佈估計，
+#       因此跨臂比較（EXP-532 的 1.05→1.25）無法判斷是否超出雜訊。
+#       這兩個 seed 與原臂合起來給出 3-seed 散佈，是判讀其他臂的前提。
+#
+# 原檔說明：
+#
+# What:
+#   逐字派生自 exp_245_b3_les_T50.toml（主 baseline），只改與「時窗加倍」直接相關的
+#   四個鍵：physics_t_max / T_total / t_early_threshold / artifacts_dir。
+#   sensor 資料仍只有 t∈[0,5]（同一份 LES-QR K=100 檔），physics collocation 延伸到
+#   t∈[0,10] —— 後半段沒有 data loss，只有 NS residual + 連續性約束。
+#
+# Why:
+#   問「PDE residual 能不能把解帶出資料時窗」。這是 sensor-only + physics 這個設定
+#   唯一能問的外推問題：t>5 之後 branch 的 h_states 凍結在最後一幀，模型只能靠
+#   trunk 的連續時間表示 + physics 往前走。
+#
+# 三個必須知道的耦合（改任一鍵前先讀）：
+#   1. T_total 是 temporal_phase_anchor 的**週期**。若沿用 5.0，t=7 與 t=2 的相位錨
+#      完全相同，外推段會與訓練段混疊 → 必須設 10.0（assembly 已 fail-fast）。
+#   2. t_early 的加權視窗是 t_early_threshold × T_total。T_total 加倍後，門檻要從
+#      0.05 減半到 0.025 才維持與 EXP-245 相同的 0.25 s 早期錨定窗。
+#   3. dns_paths 仍指向 T=5 的 DNS：那是**訓練中監控用**的 eval，時間軸必須與
+#      sensor_time 對齊。t∈[0,10] 的正式評估走另一份 T=10 DNS + evaluate_exp245.py
+#      的 sensor_time_independent 協定，不在本檔。
+#
+# 已知 confound（判讀時必須揭露）：
+#   本臂同時改了 T_total（5→10）與 physics 時窗（5→10）。若 t≤5 的重建品質相對
+#   EXP-245 有變化，無法單獨歸因於外推段的 collocation。要拆開需再跑一臂
+#   T_total=10 且 physics_t_max=5 的對照（本次未跑）。
+#
+# 派生自 EXP-245 的原始說明：
+#   B3 (full architecture) + LES_T50 sensor + Re=10000 + 20k iterations，
+#   不依賴 DNS oracle sensor，single seed=42。
+#
+# 與 pi-lnn EXP-245 差異（已知 / 待補）：
+#   - device 由 CLI / JAX_PLATFORMS 控制；TOML device 鍵忽略
+#   - lr_schedule / use_schedule_free 等 SOAP-related key 由 CLI --optimizer 控制
+#   - time_marching* 由 CLI --use_time_marching / --tm_* 控制
+#   - GradNorm 初始 weights 寫死於 train_kolmogorov.py:639 = [1.0, 0.01, 0.01, 0.01]
+#     ≠ pi-lnn 的 [1.0, 0.057, 0.057]；若需精準對齊請手動 patch
+#   - AL update freq 在 JAX 與 GradNorm 共用 gradnorm_freq；pi-lnn 是兩個分離 freq
+#   - 以下 pi-lnn key 在 JAX POC 尚未 wire-up，TOML 不放（避免 unknown_keys warn 噪音），
+#     僅列在 §JAX-TODO 區註解供未來補洞：t_early_weight / t_early_threshold /
+#     physics_collocation_strategy / soap_betas / soap_use_step_decay /
+#     lr_warmup_steps / lr_decay_steps / lr_decay_gamma /
+#     gradnorm_update_freq / gradnorm_ema_momentum / gradnorm_tasks / gradnorm_init_weights /
+#     al_constraints / al_init_lambda / al_update_freq / al_ema_momentum /
+#     al_allow_cont_in_gradnorm / time_marching_warmup_steps / use_sensor_physics
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+# Path 相對本專案 root（大檔走 PILNJAX_DATA_ROOT），
+# pi_lnn_jax/data.py:load_sensors_from_path 會自動 prefix。
+sensor_jsons = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy"]
+re_values = [10000.0]
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構 (B3 full, 對齊 pi-lnn EXP-245) ──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 10.0                # 外推後的總時窗（= 相位錨週期；見檔頭耦合 #1）
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+# physics_loss_weight = 1.0 修雙重乘法 bug（effective = 1.0 × GradNorm_weight，對齊 pi-lnn）
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0       # 對齊 pi-lnn：t < T×threshold 的 sensor 錨定強化
+t_early_threshold = 0.025   # 0.025 × T_total(10) = 0.25s，與 EXP-245 同一個絕對視窗
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+# physics collocation 時窗上界；資料只到 5.0，[5,10] 段只有 PDE residual。
+# 注意 collocation 點數不變 → 單位時間的取樣密度相對 EXP-245 減半（刻意：
+# 保持每步計算量可比；密度是這個實驗的已知限制，不是被忽略的變因）。
+physics_t_max = 10.0
+# sensor mini-batch：每 step decode 2000/10100 sensor query 點（encode 仍全量）。
+# 5000-step A/B 驗證：loss plateau 比 full 差 <5%，速度 1.58×（280→177ms/step）。
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 1
+artifacts_dir = "artifacts/kolmogorov/exp530s1_b3_extrap_T10"
+
+# ── LR schedule（對齊 pi-lnn EXP-245）─────────────────────────────────
+# train_kolmogorov.py 已 wire 到 build_optimizer；schedule_free 模式下 schedule
+# 作為 schedule_free 的 learning_rate 參數，inner adam 走 unit lr。
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm（對齊 pi-lnn freq=1000 + init_weights + ema_momentum）─────
+# JAX TRAIN_SCHEMA 鍵名是 gradnorm_freq；pi-lnn 是 gradnorm_update_freq（同義）。
+# 注意：AL update 在 JAX 共用此 freq；pi-lnn al_update_freq=100 無法獨立設定。
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05    # safety floor，防止 G_data→0 後 physics 完全被壓
+
+# legacy 鎖定：schema 預設已改 use_rwf/cfc_input_dependent_tau=on；此論文主 baseline 明示
+# false 保留舊架構與既有 checkpoint 可重現（且維持 vs exp_245_b3_les_T50_liquidtau 的 on/off 對照）
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]   # 對齊 pi-lnn；舊版寫死 [1, .01, .01, .01]
+gradnorm_ema_momentum = 0.9                          # 對齊 pi-lnn；舊版寫死 0.5
+
+# ── Augmented Lagrangian ────────────────────────────────────────────────────
+al_update_freq = 100     # 對齊 pi-lnn（從 gradnorm_freq=1000 分離，更頻繁更新 lambda）
+
+# ── SOAP betas ─────────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]   # 對齊 pi-lnn；SOAP_JAX 預設 [0.95, 0.95] → sensor 收斂太快
+
+# ── Augmented Lagrangian for continuity ──────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# ─────────────────────────────────────────────────────────────────────
+# §JAX-TODO — pi-lnn EXP-245 已開但 JAX POC 尚未實作的 key（不放進 [train]）
+# ─────────────────────────────────────────────────────────────────────
+# t_early_weight = 10.0
+# t_early_threshold = 0.05
+# physics_collocation_strategy = "random"
+# lr_schedule = "soap"                  # 改用 CLI: --optimizer schedule_free
+# use_schedule_free = true              # 改用 CLI: --optimizer schedule_free
+# soap_betas = [0.9, 0.999]
+# soap_precondition_frequency = 2
+# (lr_warmup_steps / lr_decay_steps / lr_decay_gamma / min_learning_rate
+#  已從 JAX-TODO 移出，現於 [train] 區實裝)
+# soap_use_step_decay = true
+# (gradnorm_ema_momentum / gradnorm_init_weights 已從 JAX-TODO 移出，現於 [train] 區實裝)
+# gradnorm_tasks = ["data", "ns_u", "ns_v", "cont"]
+# al_constraints = ["cont"]
+# al_init_lambda = 0.0                  # train_kolmogorov.py:657 寫死 0.0（一致）
+# al_update_freq = 100                  # JAX 共用 gradnorm_freq
+# al_ema_momentum = 0.5
+# al_allow_cont_in_gradnorm = true
+# time_marching = true                  # 改用 CLI: --use_time_marching
+# time_marching_start = 0.5             # 改用 CLI: --tm_start_frac 0.5
+# time_marching_warmup = 0.3            # ≈ pi-lnn 比例制；JAX 用絕對步數
+# time_marching_warmup_steps = 2000     # 改用 CLI: --tm_warmup_steps 2000
+# use_sensor_physics = false
+# device = "cuda"                       # 改用 env JAX_PLATFORMS=cuda

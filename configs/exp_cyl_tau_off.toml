@@ -1,0 +1,62 @@
+# configs/exp_cyl_tau_off.toml — cylinder liquid-τ 單 seed 探針（臂：tau off）
+#
+# What: 在 cylinder（CEXP-002 主線）上量 cfc_input_dependent_tau 的 on/off 效果。
+#       兩臂除該旗標外逐項相同，只有 artifacts_dir 不同（避免互相覆寫）。
+#
+# Why: 該旗標在 cylinder 上**從未被驗證過**——證據全在 Kolmogorov，而那批顯示
+#      主指標無效果（n=4, t=+0.05）、gain 只在 KE 軸且不顯著（-0.032 pp, t=-0.60）。
+#      2026-09-03 起 assembly.CFG 把它釘為 True，吃掉 cylinder +132,864 參數的 98.8%。
+#      先跑單 seed 看有無效果量級，再決定是否值得 multi-seed。
+#
+# ⚠️ 旗標不在本檔設定——cylinder 讀 model_kwargs 零次（見 configs 內的指路註解）。
+#      臂 on  = main 的 assembly.CFG（cfc_input_dependent_tau=True）
+#      臂 off = branch exp/cyl-tau-single-seed 的 assembly.CFG（改為 False）
+#      兩臂的 config 完全相同，差異只在程式碼側，因此比較是乾淨的。
+
+#
+# What: 複現 PyTorch CEXP-002 唯一 working baseline（QR wake K=100 + soft wall BC + 弱 physics
+#       + GradNorm 4-task + SOAP/ScheduleFree + physics denorm），判據用 KE（非 field-L2）。
+# Why : pi-lnn-jax 的 CEXP-002 起點；failure 對比臂以 --n_collo 1024 覆蓋（GradNorm 放大假說）。
+#
+# 註：optimizer 固定為 schedule_free + soap（train_cylinder.py 預設，非 TOML 可調）；
+#     GradNorm 為 3-task [data, ns_u, ns_v] init [1.0, 0.01, 0.01]（trainer 內寫死）；
+#     continuity 不進 GradNorm，改由 Augmented Lagrangian 約束（al_rho/al_lambda_clip）。
+#     此 config 只列 train_cylinder.py 實際讀取的 key。
+
+case = "cylinder"
+cylinder_data_npz = "data/cylinder_v1.npz"
+
+# physics（弱）：collocation 點數；GradNorm 從 0.01 起調 physics 權重
+num_physics_points = 64
+gradnorm_freq = 25
+gradnorm_ema_momentum = 0.9
+use_physics_denormalization = true
+
+# 模型建構值不在這裡設。cylinder pipeline 讀 model_kwargs **零次**——它走
+# pi_lnn_jax/pipeline/cylinder/assembly.py 的 CFG 顯式建構（tests/
+# test_schema_default_traps.py 的 docstring 也記著這件事）。本檔一度寫著
+# `use_rwf = false` / `cfc_input_dependent_tau = false` 並自稱 legacy 鎖定，
+# 那兩行從來沒有生效過：實際建構值是 assembly.CFG 的 True/True/0.5。
+# 要改 cylinder 的模型規格，改 assembly.CFG，並同步 tests/test_cylinder_assembly.py
+# 的 EXPECTED_CFG 與 EXPECTED_N_PARAMS。
+
+# soft wall BC（固定權重，置於 GradNorm 之外）
+bc_weight = 0.1
+bc_body_weight = 2.0
+bc_n = 128
+
+# 時間課程（對齊 CEXP-002）：t_early 強錨初始條件 + time-marching 漸進展開時間窗
+t_early_weight = 10.0
+t_early_threshold = 0.05
+time_marching = true
+time_marching_start = 0.5
+time_marching_warmup = 0.3
+# 註：encoder trim 省略（jit 動態長度會頻繁重編譯；PyTorch 註解明說 trim 僅計算節省、非正確性需求）
+
+# optimizer / 訓練長度
+learning_rate = 1e-3
+iterations = 10000
+seed = 42
+
+[run]
+artifacts_dir = "artifacts/cyl_tau_off"

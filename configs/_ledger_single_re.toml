@@ -1,0 +1,78 @@
+# configs/_ledger_single_re.toml — Ledger fixture 專用 config（非實驗記錄；不進 claims-ledger）
+#
+# What:
+#   共用基礎 config，同時用於 f1（全關條件）與 f3（RAR 分支）兩個 fixture。
+#   本檔定義一個單一 Re、連續-Re 物理正則關閉、sensor mini-batch 關閉、
+#   dropout 不開的基礎訓練——把五個條件式 RNG 消費點都關掉。
+#
+#   f1（fixture 1）執行時：無 CLI RAR 旗標 → 全部條件式分支都不觸發，
+#           驗證「所有條件式 RNG 都被正確 consume」。
+#   f3（fixture 3）執行時：加上 CLI 旗標 --rar_freq 3 --rar_warmup 5 --rar_pool_size 128
+#           → 只開啟 RAR 條件分支（見 scripts/slurm/record_ledger.sbatch.tmpl f3 區段），
+#           在 s > rar_warmup 且 s % rar_freq == 0 時走 rar_sample 而非 uniform 取樣，
+#           消耗獨立的 rar_state.rng_key（curriculum.RARState），不是主 rng_collo 流。
+#
+# Why 單一 config 供兩段用：
+#   f1（全關）與 f2（全開但不含 RAR）都不會觸發 RAR 分支，需要 f3 單獨用
+#   RAR 旗標開啟它。RAR 的有無完全由 CLI 控制，config 本身一致，因此可共用
+#   這一份相對路徑的 single-Re config，並藉由 CLI 旗標區分行為。詳見
+#   .superpowers/sdd/task-3-brief.md。
+#
+# 底線前綴（_ledger_single_re）表示這不是一份實驗紀錄，只是 diagnostic ledger
+#   用的固定小 config。
+
+[model]
+# 與 _ledger_f2.toml 同規模（比照 configs/mini_smoke.toml 的 M3 smoke 規模）
+d_model = 32
+d_time = 8
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 1
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 32
+operator_rank = 32
+domain_length = 1.0
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+
+[train]
+iterations = 20
+seed = 42
+num_physics_points = 16
+num_sensor_query_points = 0       # 0 → 不走 sensor_idx 分支
+use_continuous_re_physics = false # → 不走 rng_crp 分支
+gradnorm_freq = 5
+use_gradnorm = true
+al_update_freq = 4
+al_warmup_steps = 2
+checkpoint_period = 10
+
+
+# 2026-08-03（架構候選 H）：以下四鍵原本省略，落到 schema 預設。
+# 寫的就是它們原本拿到的值（實測 legacy_config 解析結果），行為不變——
+# 目的是讓「schema 預設」不再是任何 config 的實際來源，那個預設才動得了。
+lr_warmup_steps = 0
+lr_decay_steps = 0
+lr_decay_gamma = 1.0
+t_early_weight = 1.0
+
+[data]
+# 只留單一 Re（configs/eval_multi_re_train5_crp.toml data 區的第一筆，Re=1000）；
+# sbatch f3 區段不傳 --multi_re → n_datasets=1，不走 rng_re 分支。
+re_values = [1000.0]
+sensor_jsons = [
+  "data/sensors/sensors_qrpivot_K100_Re1000_N128_t0-5.json",
+]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_dt3p91e4_si64_seed42.npy",
+]
+re_norm_scale = 1000000.0
+observed_sensor_channels = ["u", "v"]
+
+# 2026-08-29：明寫 use_rwf。本檔是指紋 fixture 的重建來源，若讓它吃 schema
+# 預設，任何預設變更都會讓 test_fingerprint_recording 假紅——而該測試比對的是
+# 「訓練當時記錄的指紋」vs「eval 端重建的指紋」，兩側必須指向同一個建構值。
+# fixture 錄於 use_rwf=False 的年代，故此處明寫 false 以保持一致。
+use_rwf = false

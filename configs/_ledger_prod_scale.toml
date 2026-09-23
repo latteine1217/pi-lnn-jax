@@ -1,0 +1,75 @@
+# configs/_ledger_prod_scale.toml — Kolmogorov 驗收 fixture f4（生產規模）
+#
+# What: 資料與 _ledger_single_re.toml 相同（單一 Re=1000、N128，載入快），
+#       但模型維度改為生產規模（對齊 exp_245_b3_les_T50.toml），
+#       並開啟 sensor query 分支。
+#
+# Why : 兩案的驗收強度原本不對稱（wave2 spec §8.3）。cylinder 的三份 fixture 用的是
+#       真正的 CEXP-002 生產 config（寬度 256、314 萬參數）；Kolmogorov 的三份卻是
+#       為了快速錄 ledger 而刻意縮小的診斷 config（寬度 32、5.7 萬參數）。
+#       分支覆蓋是夠的（f2 已含 multi-Re、CRP、sensor query、sensor dropout；
+#       f3 含 RAR），缺的只有**規模**——只在特定張量形狀下才浮現的搬移錯誤，
+#       Kolmogorov 這一側抓不到。
+#
+# 為何不直接用生產 config：那要載 Re=10000 N256 的 LES sensor 與大 DNS，
+#       成本遠高於本 fixture 想買的東西。§8.3 明列的優先序是「先覆蓋寬度與
+#       sensor query 分支」，故此處放大模型、沿用小資料。
+#
+# 實測成本參考（job 4740/4741，同節點 CPU）：寬度 32 每步 3.1 秒、
+#       寬度 256 每步 8.4 秒——成本差距遠小於參數量比（2.7 倍 vs 55 倍）。
+
+[model]
+# ↓ 以下六項對齊 exp_245_b3_les_T50.toml 的生產規模（縮小版是 32/8/1/32/32）
+d_model = 256
+d_time = 16
+num_token_attention_layers = 2
+query_mlp_hidden_dim = 256
+operator_rank = 256
+fourier_embed_dim = 128
+
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+token_attention_heads = 4
+num_query_mlp_layers = 1
+domain_length = 1.0
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+
+[train]
+iterations = 20
+seed = 42
+num_physics_points = 16
+num_sensor_query_points = 64      # > 0 → 走 sensor_idx 分支（rng_collo 的 sub_sq）
+use_continuous_re_physics = false # 單一 Re；CRP 分支由 f2 覆蓋
+gradnorm_freq = 5
+use_gradnorm = true
+al_update_freq = 4
+al_warmup_steps = 2
+checkpoint_period = 10
+
+
+# 2026-08-03（架構候選 H）：以下四鍵原本省略，落到 schema 預設。
+# 寫的就是它們原本拿到的值（實測 legacy_config 解析結果），行為不變——
+# 目的是讓「schema 預設」不再是任何 config 的實際來源，那個預設才動得了。
+lr_warmup_steps = 0
+lr_decay_steps = 0
+lr_decay_gamma = 1.0
+t_early_weight = 1.0
+
+[data]
+re_values = [1000.0]
+sensor_jsons = [
+  "data/sensors/sensors_qrpivot_K100_Re1000_N128_t0-5.json",
+]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re1000_N128_T5_dt3p91e4_si64_seed42.npy",
+]
+re_norm_scale = 1000000.0
+observed_sensor_channels = ["u", "v"]
+
+# 2026-08-29：明寫 use_rwf。本檔是指紋 fixture 的重建來源，若讓它吃 schema
+# 預設，任何預設變更都會讓 test_fingerprint_recording 假紅——而該測試比對的是
+# 「訓練當時記錄的指紋」vs「eval 端重建的指紋」，兩側必須指向同一個建構值。
+# fixture 錄於 use_rwf=False 的年代，故此處明寫 false 以保持一致。
+use_rwf = false

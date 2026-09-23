@@ -1,0 +1,179 @@
+#!/bin/bash
+#SBATCH --job-name=jax_ckptab_{EXP_ID}
+#SBATCH --output=logs/jax_ckptab_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_ckptab_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#
+# What: 驗收層 B —— **舊 ckpt 相容性**。以重構前程式碼產生存檔，
+#       兩邊各自從**同一份**存檔還原並續跑，比對還原後的每一步與最終狀態。
+#
+#   (0) BASE 產生 ckpt：跑 10 步、save_every 10。
+#   (1) 把該 ckpt 各複製一份給兩邊（orbax 對已存在的 step 直接拋
+#       StepAlreadyExistsError，兩邊寫同一個目錄必炸）。
+#   (2) resume determinism control：BASE 從自己的副本 resume 兩次，比 digest。
+#       不預設 resume 路徑可重現，先證明——同 fresh-run 對拍的紀律。
+#   (3)(4) BASE 與 HEAD 各自從副本 resume 到 20 步。
+#   (5) 對拍：步 11–20 逐欄位（**含 resume 後第一步**）+ params/opt digest + summary。
+#
+# Why 這支必須存在:
+#   驗收層 B 至今**從未被測**（wave1 spec §7、wave2 spec §8.2）。所有既有對拍
+#   都是 fresh run；唯一那條 restore 單元測試的假 manager 直接丟棄參照狀態，
+#   把 _to_ckpt_state 整個換成 None 它依然通過。ckpt pytree 少一欄、欄位順序
+#   改變、step dtype 換掉或 optimizer template 不相容——本機測試全綠，
+#   但第一個舊 ckpt 還原就會失敗。
+#
+# Why 不能只比「還原後的 state」:
+#   BASE 是重構前的單體，沒有可單獨呼叫的 restore；能比的只有「兩邊各自從
+#   同一份存檔續跑」的可觀測行為。這正好就是層 B 的要求本身——
+#   「新程式讀得動舊 ckpt，且 resume 後第一步與舊程式相同」。
+#
+# 判定邏輯不寫在本檔：全部委給 scripts/_common/ab_compare.py（由測試釘住）。
+#
+# Usage（lab-server head node，HEAD worktree）:
+#   BASE_WT=$HOME/pi-lnn-jax-base PILNJAX_ROOT=$HOME/pi-lnn-jax-multire \
+#   EXPECT_BASE=<verify/base-28b007a 的 sha> EXPECT_HEAD=<受測 commit 的 sha> \
+#   TMPL=scripts/slurm/verify_ckpt_compat.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh ckptab configs/_ledger_single_re.toml
+
+set -euo pipefail
+
+HEAD_WT="${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax-ledger}"
+BASE_WT="${BASE_WT:-$HOME/pi-lnn-jax-base}"
+EXPECT_BASE="${EXPECT_BASE:-}"
+EXPECT_HEAD="${EXPECT_HEAD:-}"
+[ -n "$EXPECT_BASE" ] || { echo "[ERR] 必須提供 EXPECT_BASE（預期的基準 commit）" >&2; exit 6; }
+cd "$HEAD_WT"
+
+export PYTHONUNBUFFERED=1
+# 基準分支 worktree（verify/base-*）的舊 data.py 只認 PILNN_ROOT，故變數名保留；
+# 指向大檔池而非 pi-lnn repo。HEAD 側走 PILNJAX_DATA_ROOT，兩者解析到同一批檔案，
+# 搜尋序對稱（PILNJAX_ROOT → 大檔池），bit-identical 契約不受影響。
+export PILNN_ROOT="${PILNN_ROOT:-$HOME/pi-lnn-jax-main}"
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+export PILNJAX_ROOT="${PILNJAX_ROOT:-$HOME/pi-lnn-jax-multire}"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export UV_OFFLINE=1
+export JAX_PLATFORMS=cpu
+export PILNN_RNG_LEDGER=1
+
+CFG="${CFG:-configs/_ledger_single_re.toml}"
+GEN_STEPS="${GEN_STEPS:-10}"       # 產生 ckpt 跑到第幾步
+TOTAL_STEPS="${TOTAL_STEPS:-20}"   # resume 後續跑到第幾步
+
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+[ -d "$BASE_WT" ] || { echo "[ERR] BASE worktree 不存在：$BASE_WT" >&2; exit 3; }
+for wt in "$HEAD_WT" "$BASE_WT"; do
+  [ -x "$wt/.venv/bin/python" ] || { echo "[ERR] $wt/.venv 缺" >&2; exit 4; }
+done
+
+HEAD_SHA="$(git -C "$HEAD_WT" rev-parse --short HEAD)"
+BASE_SHA="$(git -C "$BASE_WT" rev-parse --short HEAD)"
+
+echo "======================================================================"
+echo "[CKPT-AB-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  HEAD: $HEAD_WT ($HEAD_SHA)"
+echo "  BASE: $BASE_WT ($BASE_SHA)"
+echo "  預期 BASE=$EXPECT_BASE  HEAD=${EXPECT_HEAD:-（未指定）}"
+echo "  config=$CFG   ckpt@${GEN_STEPS} → resume → ${TOTAL_STEPS}"
+echo "======================================================================"
+
+# ─── 清空本 job 的輸出目錄（白名單鎖死路徑形狀，同 fresh-run 對拍）───────
+for wt in "$HEAD_WT" "$BASE_WT"; do
+  target="$wt/artifacts/ckptab"
+  case "$target" in
+    */artifacts/ckptab) rm -rf "$target" ;;
+    *) echo "[ERR] 拒絕刪除非預期路徑：$target" >&2; exit 9 ;;
+  esac
+done
+echo "[cleanup] 兩個 worktree 的 artifacts/ckptab 已清空"
+
+# 在 $1 worktree 跑一次訓練。$2=artifacts 子路徑  $3...=額外旗標
+train () {
+  local wt="$1" out="$2"; shift 2
+  ( cd "$wt" && mkdir -p "$out" \
+    && PYTHONPATH=. uv run python -u train_kolmogorov.py \
+         --config "$CFG" --seed 42 --arch liquid \
+         --artifacts_dir "$out" --eval_every 0 "$@" \
+       > "$out/stdout.txt" 2>&1 )
+}
+
+# ─── (0) BASE 產生 ckpt ─────────────────────────────────────────────────
+echo ""; echo "── (0) BASE 跑 ${GEN_STEPS} 步並存 ckpt ──"
+set +e
+train "$BASE_WT" artifacts/ckptab/gen --steps "$GEN_STEPS" --save_every "$GEN_STEPS"; R0=$?
+set -e
+echo "[0] rc=${R0}"
+[ "$R0" -eq 0 ] || { echo "[0] 產生 ckpt 失敗——不往下跑" >&2; exit 2; }
+GEN_CKPT="$BASE_WT/artifacts/ckptab/gen/checkpoints"
+[ -d "$GEN_CKPT/$GEN_STEPS" ] || {
+  echo "[ERR] 預期的 ckpt step 不存在：$GEN_CKPT/$GEN_STEPS" >&2
+  ls -la "$GEN_CKPT" 2>&1 >&2; exit 7; }
+echo "[0] ckpt 就位：$GEN_CKPT/$GEN_STEPS"
+
+# ─── (1) 各複製一份 ──────────────────────────────────────────────────────
+# Why 複製而非共用：resume 會在同一個 ckpt 目錄寫入新 step，兩邊共用時
+#      orbax 對已存在的 step 直接拋 StepAlreadyExistsError。
+for dst in "$BASE_WT/artifacts/ckptab/resume" "$HEAD_WT/artifacts/ckptab/resume" \
+           "$BASE_WT/artifacts/ckptab/det_b"; do
+  mkdir -p "$dst"
+  cp -r "$GEN_CKPT" "$dst/checkpoints"
+done
+echo "[1] ckpt 已複製給 base/head/det_b 三份"
+
+# ─── (2) resume determinism control ─────────────────────────────────────
+# 不預設「從同一份 ckpt 還原再續跑」是可重現的——先證明，不過就不必往下比。
+echo ""; echo "── (2) resume determinism control：BASE 從同一份 ckpt 還原兩次 ──"
+set +e
+train "$BASE_WT" artifacts/ckptab/resume --steps "$TOTAL_STEPS" --resume_step "$GEN_STEPS"; R2A=$?
+train "$BASE_WT" artifacts/ckptab/det_b  --steps "$TOTAL_STEPS" --resume_step "$GEN_STEPS"; R2B=$?
+set -e
+echo "[2] 兩跑 rc=${R2A}/${R2B}"
+[ "$R2A" -eq 0 ] && [ "$R2B" -eq 0 ] || {
+  echo "[2] resume 錄製失敗——不往下跑" >&2; exit 2; }
+set +e
+( cd "$BASE_WT" && PYTHONPATH=. uv run python "$HEAD_WT/scripts/_common/ab_compare.py" determinism \
+    --a artifacts/ckptab/resume/rng_ledger.json \
+    --b artifacts/ckptab/det_b/rng_ledger.json )
+R2=$?; set -e
+[ "$R2" != "0" ] && { echo "[2] rc=$R2，resume 路徑不可重現，位元對拍不可行"; exit 2; }
+echo "[2] resume determinism rc=0"
+
+# ─── (3) HEAD 從同一份 ckpt 還原 ─────────────────────────────────────────
+echo ""; echo "── (3) HEAD 從 BASE 產生的 ckpt 還原並續跑 ──"
+set +e
+train "$HEAD_WT" artifacts/ckptab/resume --steps "$TOTAL_STEPS" --resume_step "$GEN_STEPS"; R3=$?
+set -e
+echo "[3] rc=${R3}"
+[ "$R3" -eq 0 ] || {
+  echo "[3] HEAD 讀不動 BASE 產生的 ckpt —— 驗收層 B 失敗。stdout：" >&2
+  tail -40 "$HEAD_WT/artifacts/ckptab/resume/stdout.txt" >&2; exit 1; }
+
+# ─── (4) 對拍 ───────────────────────────────────────────────────────────
+echo ""; echo "── (4) BASE vs HEAD：resume 後逐步 + digest + summary ──"
+EVIDENCE="$HEAD_WT/knowledge/superpowers/evidence/ckpt_ab_${SLURM_JOB_ID:-local}.json"
+set +e
+( cd "$HEAD_WT" && PYTHONPATH=. uv run python scripts/_common/ab_compare.py ab \
+    --base-root "$BASE_WT" --head-root "$HEAD_WT" \
+    --names resume \
+    --ledger-rel 'artifacts/ckptab/{name}/rng_ledger.json' \
+    --summary-rel 'artifacts/ckptab/{name}/summary.json' \
+    --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+    --expect-base "$EXPECT_BASE" --expect-head "$EXPECT_HEAD" \
+    --evidence "$EVIDENCE" \
+    --job-id "${SLURM_JOB_ID:-}" --node "${SLURMD_NODENAME:-}" \
+    --recorded-utc "$(date -u '+%FT%TZ')" )
+R4=$?; set -e
+
+echo ""
+echo "======================================================================"
+echo "[CKPT-AB-{EXP_ID}] gen=0 det=0 head_resume=${R3} compare=${R4}"
+echo "  compare=0 → 新管線讀得動舊 ckpt，且 resume 後每一步與舊程式相同"
+echo "             （驗收層 B 通過；此前該層從未被測）"
+echo "  證據：$EVIDENCE"
+echo "======================================================================"
+exit $(( R3 | R4 ))

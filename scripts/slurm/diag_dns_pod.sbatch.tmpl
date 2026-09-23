@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH --job-name=jax_dnspod_{EXP_ID}
+#SBATCH --output=logs/jax_dnspod_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_dnspod_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#
+# DNS 速度場的 POD 譜 vs 感測取樣圓盤的 Fourier 帶寬
+# 回答的問題：空間軸（uv_rel_err vs K）在 K≈250 之後變平，是能譜陡峭還是低維結構？
+#
+# 為什麼**不要** GPU：純 numpy，不建模型、不 restore ckpt、不碰 JAX。
+#   要 GPU 只會讓它排在訓練佇列後面，而它跟訓練無關。
+#
+# 環境變數：
+#   DNS_PATH       DNS .npy（選填；預設主線 Re=10000 那條）
+#   TIME_STRIDE    時間下採樣（選填，預設 1）——腳本端無預設，這裡明示傳入
+#   OUT_PATH       JSON 落點（選填）
+#
+# 用法：
+#   TMPL=scripts/slurm/diag_dns_pod.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh dnspod configs/exp_k200_snap_st2_s42.toml
+#   （config 只用來滿足 submit_exp.sh 的介面，本診斷不讀它）
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+
+DNS_PATH="${DNS_PATH:-data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy}"
+TIME_STRIDE="${TIME_STRIDE:-1}"
+OUT_PATH="${OUT_PATH:-artifacts/diag/dns_pod_rank_{EXP_ID}.json}"
+
+echo "======================================================================"
+echo "[JAX-DNSPOD-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  dns:          ${DNS_PATH}"
+echo "  time_stride:  ${TIME_STRIDE}"
+echo "  out:          ${OUT_PATH}"
+echo "======================================================================"
+
+uv run python -u scripts/diag_dns_pod_rank.py \
+  --dns "${DNS_PATH}" \
+  --time-stride "${TIME_STRIDE}" \
+  --out "${OUT_PATH}"
+
+echo "[$(date '+%F %T')] DNSPOD-{EXP_ID} 完成"

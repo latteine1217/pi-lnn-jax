@@ -1,0 +1,94 @@
+# configs/eval_533_extrap_T10_autoreg.toml — EXP-533（branch 自迴歸臂）的 t∈[0,10] 評估設定
+#
+# What:
+#   與訓練用的 exp_533_b3_extrap_T10_autoreg.toml **只差一個鍵**：dns_paths 指向延長版
+#   （T=10）DNS。sensor、模型架構、artifacts_dir（= ckpt 落點）一律相同。
+#
+# Why:
+#   訓練期的 in-training eval 必須與 sensor_time 對齊，所以訓練 config 的 dns_paths
+#   仍是 T=5 檔。t>5 的外推段只能用另一份真值評估，而 evaluate_exp245.py 的
+#   `sensor_time_independent` 協定正是為此存在：query 走 DNS 自己的格點、sensor
+#   context 走自己的序列。
+#
+# 用法（--time-stride 2 同時是 sensor 取樣率與 query 解析度）：
+#   uv run python -u scripts/evaluate_exp245.py \
+#     --protocol sensor_time_independent --time-stride 2 \
+#     --config configs/eval_530_extrap_T10.toml --ckpt latest \
+#     --arch liquid --optimizer schedule_free --base_optimizer soap \
+#     --soap_precondition_frequency 2 --output-subdir extrap_T10 --export-arrays
+#   stride=2 → sensor 101 幀（與訓練相同）、query 201 幀 @Δt=0.05 涵蓋 [0,10]。
+#
+# ⚠️ dns_paths 指向哪個 arm 由軌跡一致性驗證決定（scripts/verify_dns_extension.py）：
+#   預設寫 GPU arm（*_ds4_cuda.npy）。若 GPU arm 判 FAIL 而 CPU arm（*_ds4_numpy.npy）
+#   判 PASS，就把下面那一行改成 numpy arm——**不要**在 sbatch 裡 sed 這個鍵，
+#   這次評估用哪條軌跡當真值必須看得見。
+#   若兩臂皆 FAIL，代表沒有任何一份延長版是 sensor 那條軌跡，此時不能直接評估：
+#   必須從延長版重抽 sensor 值並重訓（見 knowledge 紀錄與訓練 job 說明）。
+
+[train]
+sensor_jsons = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T10_dt2p5e4_si100_ds4_cuda.npy"]
+re_values = [10000.0]
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構（必須與訓練逐鍵相同，否則 ckpt 指紋閘門會擋）──────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 10.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+use_rwf = false
+cfc_input_dependent_tau = false
+
+# ⚠️ 本臂的 eval 必須帶 --autoreg-pseudo-dt 0.5 --autoreg-rounds 4（與訓練一致）。
+# 自迴歸改的是推論程序：訓練有、eval 沒有就是在評另一個方法。
+# sbatch 入口 eval_extrap_T10.sbatch 由 AUTOREG_DT / AUTOREG_ROUNDS 環境變數帶入。
+#
+# ── 訓練端設定（eval 只用到 artifacts_dir / seed / optimizer 相關）────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+artifacts_dir = "artifacts/kolmogorov/exp533_b3_extrap_T10_autoreg"
+
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.025
+
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+al_update_freq = 100
+soap_betas = [0.9, 0.999]
+al_rho = 0.1
+al_lambda_clip = 10.0

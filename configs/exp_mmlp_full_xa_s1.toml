@@ -1,0 +1,93 @@
+# 主線設定下的完整版 mMLP：cross-attention **開啟** + 跨分支 U/V gating。
+# 這一格回答「完整版該不該進主線」。已知的另外三格（n=4, uv_rel_err）：
+#   xattn on  + mMLP off        7.381 ± 0.053   (rwfoff)
+#   xattn on  + trunk-only mMLP 7.511 ± 0.022   (modmlp，配對 t=+3.67，有害)
+#   xattn off + mMLP off       11.228 ± 0.078   (xattnoff)
+#   xattn off + 完整 mMLP      11.053 ± 0.093   (mmlp_full，配對 t=-6.24，有益)
+# 無 cross-attention 時完整版有益、閹割版在有 cross-attention 時有害——符號翻轉。
+# 本臂測那個翻轉在主線設定下是否也成立，或 cross-attention 已經做掉了跨分支
+# 對齊該做的事而兩者不疊加。
+# 與 exp_mmlp_full_s* 只差 disable_cross_attention 一鍵。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+sensor_jsons = [
+  "data/sensors/re10000/sensors_les_qr_K100_N256_t0-20_si128.json",
+]
+re_values = [10000.0]
+time_strides = [8]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T20_dt1p95e4_si128_seed42.npy",
+]
+observed_sensor_channels = ["u", "v"]
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── 模型架構（B3 + vector attention, no W_O）──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 20.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "vector"
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 1
+artifacts_dir = "artifacts/kolmogorov/mmlp_full_xa_s1"
+
+# ── LR schedule ────────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ───────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+
+# legacy 鎖定：schema 預設已改 use_rwf/cfc_input_dependent_tau=on；此 Re=10000 baseline 明示
+# false 保留舊 param-tree（且維持 vs exp_re10000_T20_les_qr_v3_rwf 的 RWF A/B 對照）
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ───────────────────────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+al_update_freq = 100
+al_warmup_steps = 5000
+
+# ── SOAP betas ────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]
+
+# ── ablation: 完整版 mMLP（跨分支 U/V），cross-attention 維持開啟 ──
+use_modified_mlp = true
+mmlp_branch_u = true
+mmlp_gate_branch = true
+disable_cross_attention = false

@@ -1,0 +1,51 @@
+# configs/_ledger_cyl_weighting.toml — cylinder 驗收 fixture c4（GradNorm / AL 觸發）
+#
+# What: 與 exp_cyl_cexp002_notm.toml（fixture c1）逐鍵相同，只把兩個 weighting
+#       更新頻率調小，讓 20 步的對拍區間內 GradNorm 與 AL 各觸發數次。
+#
+# Why : c1/c2/c3 的 gradnorm_freq=25、al_update_freq 預設跟隨它，而對拍只跑 20 步
+#       → `s % 25 == 0` 在 s=1..20 恆不成立，**那條路徑的重構從未被任何對拍涵蓋**
+#       （wave2 spec §8.3）。GradNorm 會改寫 task_weights、AL 會推進 lambda，
+#       兩者都直接進 optimizer 軌跡；沒被涵蓋等於驗收有一塊空白。
+#
+# 兩個頻率刻意**不同**（5 與 7）：若寫成相同值，「AL 的觸發被誤接到 GradNorm 的
+# 頻率」這種錯就會被兩者恆同步的巧合遮住。取 5 / 7 在 20 步內分別觸發
+# 4 次（5,10,15,20）與 2 次（7,14），皆 ≥2，滿足 §8.3 的要求。
+#
+# 與 c1 的唯一差異就是這兩個鍵——c1/c4 因此是一對只差 weighting 觸發的對照，
+# 非觸發步的排程必須逐位元相同。
+
+case = "cylinder"
+cylinder_data_npz = "data/cylinder_v1.npz"
+
+# physics（弱）：collocation 點數；GradNorm 從 0.01 起調 physics 權重
+num_physics_points = 64
+gradnorm_freq = 5                 # ← c1 是 25（20 步內不觸發）
+al_update_freq = 7                # ← c1 未設，預設跟隨 gradnorm_freq
+gradnorm_ema_momentum = 0.9
+use_physics_denormalization = true
+
+# soft wall BC（固定權重，置於 GradNorm 之外）
+bc_weight = 0.1
+bc_body_weight = 2.0
+bc_n = 128
+
+# 早期時間加權
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# time-marching 關閉（同 c1；c2 才是開啟的那一支）
+time_marching = false
+time_marching_start = 0.5
+time_marching_warmup = 0.3
+
+learning_rate = 1e-3
+iterations = 10000
+seed = 42
+# 模型建構值不在這裡設。cylinder pipeline 讀 model_kwargs **零次**——它走
+# pi_lnn_jax/pipeline/cylinder/assembly.py 的 CFG 顯式建構（tests/
+# test_schema_default_traps.py 的 docstring 也記著這件事）。本檔一度寫著
+# `use_rwf = false` / `cfc_input_dependent_tau = false` 並自稱 legacy 鎖定，
+# 那兩行從來沒有生效過：實際建構值是 assembly.CFG 的 True/True/0.5。
+# 要改 cylinder 的模型規格，改 assembly.CFG，並同步 tests/test_cylinder_assembly.py
+# 的 EXPECTED_CFG 與 EXPECTED_N_PARAMS。

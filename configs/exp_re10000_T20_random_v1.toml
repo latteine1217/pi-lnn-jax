@@ -1,0 +1,92 @@
+# configs/exp_re10000_T20_random_v1.toml
+#
+# Exp A: Re=10000, T=0-20s, random K=100 sensor positions, 801 time snapshots.
+# attention_kind="vector", use_mha_out_proj=false。
+#
+# 目標：測試長時間窗（20s vs EXP-245 的 5s）是否讓 loss 進一步收斂。
+# 對照組：exp_re10000_T20_les_qr_v1.toml（同架構，LES QR sensor 位置）。
+#
+# 架構延續 EXP-245 B3（d_model=256, 2 token-attn layers），
+# 差異：attention_kind="vector" + use_mha_out_proj=false + T_total=20.0
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+# 相對路徑由 load_sensors_from_path 優先查 PILNJAX_ROOT（pi-lnn-jax data/）
+sensor_jsons = [
+  "data/sensors/re10000/sensors_random_K100_N256_t0-20_si128_seed42.json",
+]
+re_values = [10000.0]
+# time_strides=[8]：801 步 → 101 步（0.2s 間距），覆蓋 T=0-20s。
+# EXP-245 NPZ 有 201 步 + stride=2 → 101 步；stride=4(201步) 仍 OOM(16.19GiB)。
+# stride=8 → 101 步，與 EXP-245 記憶體完全對齊。
+time_strides = [8]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T20_dt1p95e4_si128_seed42.npy",
+]
+observed_sensor_channels = ["u", "v"]
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── 模型架構（B3 + vector attention, no W_O）──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 20.0              # 對應 T=20s 時間窗
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+# vector attention 的 [3N, K, hidden] 中間張量：hidden=256→315MB/份，物理 autodiff 展開後 ~15GB OOM。
+# hidden=64 → 78MB/份，物理 autodiff 後 ~4GB，適配 RTX 3090 24GB。
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "vector"
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0       # 前 5% 時間（≈ 0-1s）的 sensor 錨定強化
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+# 801 × 100 = 80100 total sensor queries；mini-batch=2000 維持與 EXP-245 相同顆粒
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+artifacts_dir = "artifacts/kolmogorov/re10000_T20_random_v1"
+
+# ── LR schedule ────────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ───────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ───────────────────────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+al_update_freq = 100
+
+# ── SOAP betas ────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false

@@ -1,0 +1,90 @@
+# configs/exp_re10000_T20_les_qr_v1.toml
+#
+# Exp B: Re=10000, T=0-20s, LES QR-pivot K=100 sensor positions, 801 time snapshots.
+# attention_kind="vector", use_mha_out_proj=false。
+#
+# 目標：與 Exp A (random) 做 sensor placement 對照；
+#        LES QR 位置在 EXP-245 已證明比 random 好（工程現場無 DNS oracle）。
+#
+# 座標來源：sensors_qrpivot_K100_N256_t0-5_si100_les_n256_T50standalone.json
+#           （EXP-245 使用的 LES T50 QR 選點，對同一 Re=10000 flow 做選點）
+#           本實驗以相同位置對全 T=20 DNS 重新抽取 sensor values。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+sensor_jsons = [
+  "data/sensors/re10000/sensors_les_qr_K100_N256_t0-20_si128.json",
+]
+re_values = [10000.0]
+# time_strides=[8]：801 步 → 101 步（0.2s 間距），覆蓋 T=0-20s。
+# EXP-245 NPZ 201步 + stride=2 → 101步；stride=4(201步) 仍 OOM(16.19GiB)。
+# stride=8 → 101 步，與 EXP-245 記憶體完全對齊。
+time_strides = [8]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T20_dt1p95e4_si128_seed42.npy",
+]
+observed_sensor_channels = ["u", "v"]
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── 模型架構（B3 + vector attention, no W_O）──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 20.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+# vector attention [3N,K,hidden] OOM fix：hidden=256→315MB/份 → hidden=64→78MB/份
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "vector"
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+artifacts_dir = "artifacts/kolmogorov/re10000_T20_les_qr_v1"
+
+# ── LR schedule ────────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ───────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ───────────────────────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+al_update_freq = 100
+
+# ── SOAP betas ────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false

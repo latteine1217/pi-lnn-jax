@@ -1,0 +1,168 @@
+# configs/exp_stat_b3_a035_s42.toml — 統計穩態場上的 B3 探路
+#
+# What:
+#   把 exp_245_b3_les_T50 的協定原樣搬到**統計穩態**的參考資料上。模型、K=100、
+#   iterations、optimizer、GradNorm/AL 設定全部不動，只換流場物理與資料。
+#
+# Why:
+#   現有結果全部量在一條**衰減暫態**的早期窗上（2026-08-27 裁決）：窗內難度單調
+#   下降（effective_shells 4.2→1.5，model-free 難度尺相關 0.965--0.967），
+#   time-mean 誤差因此是「難度不均勻下的平均」。穩態場上難度是常數，同一個數字
+#   才是「模型在固定難度下的表現」。這是唯一能分辨「模型學會演化」與「流場變好學」
+#   的對照，見 knowledge/experiments/kolmogorov-temporal-extrapolation-2026-08.md
+#   的最高優先待辦。
+#
+# 流場（與 exp_245 的差異全在這裡）:
+#   k_f=4, A=1.0, alpha=0.35, nu=1e-4, L=1
+#   - alpha 是線性（Ekman）阻尼。無它則 2D 逆級聯把能量堆在 k_min，評估窗永遠
+#     不在統計穩態上（tau_nu(k_min)=253，原窗長只佔 1.97%）。
+#   - k_f=4 + A=1.0 是為了保住 Re_f=79：Re_f = sqrt(A)/(nu*k_f^1.5) 正比於
+#     k_f^(-3/2)，只調 k_f 不補 A 會把流變層流（實測 k_f=8,A=0.1 → KE 0.005）。
+#   - alpha=0.35 取自 effective_shells 對 alpha 的內部極大值（高原 [0.28,0.35]，
+#     n=3--4 seeds；N=256 兩顆 seed 確認）。
+#   詳見 knowledge/experiments/kolmogorov-drag-stationarity-2026-08-31.md
+#
+# ⚠️ 與 exp_245 的一項協定差異（探路階段刻意接受，不可忽略）:
+#   exp_245 的 DNS 是 **N=1024 生成、stride-4 降採樣**到 N=256
+#   （downsample_stride=4, source_N=1024）。本檔的 DNS 是**原生 N=256**。
+#   stride 降採樣不濾波，高波數會 aliasing 折回粗網格；原生 256 有自己的去混疊
+#   與自己的 k_eta。**兩者的小尺度統計不同，而 mid-band 正是研究標的。**
+#   本檔為探路（單臂、單 seed），此差異列為已知限制；任何與 exp_245 的跨組比較
+#   都必須標註它，或先補一份 N=1024 來源的穩態 DNS（約 20 小時 + 生成器需加續跑）。
+#
+# ⚠️ 資料窗是母軌跡的單一 5 單位取樣。實測窗內均值與母軌跡均值有差
+#   （KE 0.125 vs 0.136、enstrophy 56.9 vs 62.9）——**單一窗的漲落相當於單一 seed**。
+#   要宣稱效果需要多個窗，如同需要多顆 seed。
+#
+# 其餘與 exp_245 的對齊說明見該檔檔頭（本檔未更動任何訓練超參）。
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+# Path 相對本專案 root（大檔走 PILNJAX_DATA_ROOT），
+# pi_lnn_jax/data.py:load_sensors_from_path 會自動 prefix。
+sensor_jsons = [
+  "data/kolmogorov_sensors/drag_a035/sensors_qrpivot_K100_N256_drag_a035_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/drag_a035/sensors_qrpivot_K100_N256_drag_a035_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_drag_N256_kf4_A1p0_a035_T5_win20-25_seed42.npy"]
+re_values = [10000.0]
+observed_sensor_channels = ["u", "v"]
+
+# ── 模型架構 (B3 full, 對齊 pi-lnn EXP-245) ──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+# ⚠️ 這兩個鍵是 DEPRECATED/inert（config.py 該處註解）——**沒有任何 code 讀它們**。
+# 仍設成正確值以免誤導讀者；真正生效的是下方 forcing_*_init。
+kolmogorov_k_f = 4.0
+kolmogorov_A = 1.0
+
+# ── 生效的物理常數（ForcingPrior + residual）──────────────────────────
+# exp_245 未設這兩個鍵，吃 schema 預設 0.1/2.0——那與舊流場「巧合一致」。
+# 本檔的流場是 A=1.0/k_f=4，**不設就會拿錯的 forcing 去算 residual**。
+forcing_A_init = 1.0
+forcing_k_f_init = 4.0
+learn_forcing_A = false      # 固定：這是生成資料時的已知量，不是待辨識量
+learn_forcing_k_f = false
+# 線性阻尼進 NS residual 的 -alpha*u 項。必須等於生成 DNS 時的 drag_alpha，
+# 否則 physics loss 會把模型推離真解。此值也進 model_fingerprint（§7.2），
+# eval 端錯配會被閘門擋下。
+drag_alpha = 0.35
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+# physics_loss_weight = 1.0 修雙重乘法 bug（effective = 1.0 × GradNorm_weight，對齊 pi-lnn）
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0       # 對齊 pi-lnn：t < T×threshold 的 sensor 錨定強化
+t_early_threshold = 0.05    # 對齊 pi-lnn：前 5% 時間（0.0-0.25s）upweight 10×
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+# sensor mini-batch：每 step decode 2000/10100 sensor query 點（encode 仍全量）。
+# 5000-step A/B 驗證：loss plateau 比 full 差 <5%，速度 1.58×（280→177ms/step）。
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+# ⚠️ 不得沿用 exp_245 的 artifacts_dir——那會覆寫 B3 主基線的產物。
+# 這個坑已記在 knowledge/experiments/kolmogorov-pinn-k100-rerun-2026-08-29.md：
+# 「不從 exp_245_pinn_large.toml 直接衍生：該檔的 artifacts_dir 與 B3 相同，
+#   沿用會覆寫 B3 的產物」。本檔自 exp_245_b3_les_T50 複製時漏改，已修正。
+artifacts_dir = "artifacts/kolmogorov/exp_stat_b3_a035_s42"
+
+# ── LR schedule（對齊 pi-lnn EXP-245）─────────────────────────────────
+# train_kolmogorov.py 已 wire 到 build_optimizer；schedule_free 模式下 schedule
+# 作為 schedule_free 的 learning_rate 參數，inner adam 走 unit lr。
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm（對齊 pi-lnn freq=1000 + init_weights + ema_momentum）─────
+# JAX TRAIN_SCHEMA 鍵名是 gradnorm_freq；pi-lnn 是 gradnorm_update_freq（同義）。
+# 注意：AL update 在 JAX 共用此 freq；pi-lnn al_update_freq=100 無法獨立設定。
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05    # safety floor，防止 G_data→0 後 physics 完全被壓
+
+# legacy 鎖定：schema 預設已改 use_rwf/cfc_input_dependent_tau=on；此論文主 baseline 明示
+# false 保留舊架構與既有 checkpoint 可重現（且維持 vs exp_245_b3_les_T50_liquidtau 的 on/off 對照）
+use_rwf = false
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]   # 對齊 pi-lnn；舊版寫死 [1, .01, .01, .01]
+gradnorm_ema_momentum = 0.9                          # 對齊 pi-lnn；舊版寫死 0.5
+
+# ── Augmented Lagrangian ────────────────────────────────────────────────────
+al_update_freq = 100     # 對齊 pi-lnn（從 gradnorm_freq=1000 分離，更頻繁更新 lambda）
+
+# ── SOAP betas ─────────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]   # 對齊 pi-lnn；SOAP_JAX 預設 [0.95, 0.95] → sensor 收斂太快
+
+# ── Augmented Lagrangian for continuity ──────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# ─────────────────────────────────────────────────────────────────────
+# §JAX-TODO — pi-lnn EXP-245 已開但 JAX POC 尚未實作的 key（不放進 [train]）
+# ─────────────────────────────────────────────────────────────────────
+# t_early_weight = 10.0
+# t_early_threshold = 0.05
+# physics_collocation_strategy = "random"
+# lr_schedule = "soap"                  # 改用 CLI: --optimizer schedule_free
+# use_schedule_free = true              # 改用 CLI: --optimizer schedule_free
+# soap_betas = [0.9, 0.999]
+# soap_precondition_frequency = 2
+# (lr_warmup_steps / lr_decay_steps / lr_decay_gamma / min_learning_rate
+#  已從 JAX-TODO 移出，現於 [train] 區實裝)
+# soap_use_step_decay = true
+# (gradnorm_ema_momentum / gradnorm_init_weights 已從 JAX-TODO 移出，現於 [train] 區實裝)
+# gradnorm_tasks = ["data", "ns_u", "ns_v", "cont"]
+# al_constraints = ["cont"]
+# al_init_lambda = 0.0                  # train_kolmogorov.py:657 寫死 0.0（一致）
+# al_update_freq = 100                  # JAX 共用 gradnorm_freq
+# al_ema_momentum = 0.5
+# al_allow_cont_in_gradnorm = true
+# time_marching = true                  # 改用 CLI: --use_time_marching
+# time_marching_start = 0.5             # 改用 CLI: --tm_start_frac 0.5
+# time_marching_warmup = 0.3            # ≈ pi-lnn 比例制；JAX 用絕對步數
+# time_marching_warmup_steps = 2000     # 改用 CLI: --tm_warmup_steps 2000
+# use_sensor_physics = false
+# device = "cuda"                       # 改用 env JAX_PLATFORMS=cuda

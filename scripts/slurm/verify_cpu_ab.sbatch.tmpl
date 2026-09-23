@@ -1,0 +1,163 @@
+#!/bin/bash
+#SBATCH --job-name=jax_cpuab_{EXP_ID}
+#SBATCH --output=logs/jax_cpuab_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_cpuab_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#
+# What: Kolmogorov 重構前 vs 重構後的 **CPU** 位元對拍。段落順序不可調換：
+#     (0) determinism control  (1)(2) 兩邊各錄四份  (2.5) 弱路徑門檻
+#     (2.7) ledger 關閉組態    (3) 對拍
+#
+# Why CPU: job 4729 已證 GPU 上同碼兩跑就給不同 params_digest，故 GPU 無法作為
+#     bit-identical 的判準。CPU 端通常是決定性的，但**不預設**——(0) 就是用來
+#     證明它，不過就不必往下跑。
+#
+# 編排在 scripts/slurm/_verify_common.sh，判定在 scripts/_common/ab_compare.py。
+#     本檔只留**這一案專屬**的東西：資料根、record()、fixture→config 對照。
+#     判定不得寫回 heredoc——那裡的程式碼只在 job 內執行、本機測試永遠碰不到。
+#
+# 已知踩過的坑:
+#   - compute node r740 沒有 rg（head node 有）→ 用 grep。
+#   - 每個 worktree 的 .venv 獨立；pytest 未在 pyproject 宣告，需各自 uv pip install。
+#   - _resolve_data_path 找不到檔時不拋錯而是回傳候選路徑 → 檢查必須自己 .exists()。
+#
+# Usage（lab-server head node，HEAD worktree）:
+#   PILNJAX_ROOT=$HOME/pi-lnn-jax-multire \
+#   EXPECT_BASE=<verify/base-28b007a 的 sha> EXPECT_HEAD=<受測 commit 的 sha> \
+#   TMPL=scripts/slurm/verify_cpu_ab.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh cpuab configs/_ledger_single_re.toml
+
+set -euo pipefail
+
+HEAD_WT="${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax-ledger}"
+BASE_WT="${BASE_WT:-$HOME/pi-lnn-jax-base}"
+cd "$HEAD_WT"
+# shellcheck source=scripts/slurm/_verify_common.sh
+source scripts/slurm/_verify_common.sh
+
+vc_require_expect_base
+vc_common_env
+# 基準分支 worktree（verify/base-*）的舊 data.py 只認 PILNN_ROOT，故變數名保留；
+# 指向大檔池而非 pi-lnn repo。HEAD 側走 PILNJAX_DATA_ROOT，兩者解析到同一批檔案，
+# 搜尋序對稱（PILNJAX_ROOT → 大檔池），bit-identical 契約不受影響。
+export PILNN_ROOT="${PILNN_ROOT:-$HOME/pi-lnn-jax-main}"            # 本案專屬：資料根
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+export PILNJAX_ROOT="${PILNJAX_ROOT:-$HOME/pi-lnn-jax-multire}"
+vc_preflight "$HEAD_WT" "$BASE_WT"
+
+HEAD_SHA="$(git -C "$HEAD_WT" rev-parse --short HEAD)"
+BASE_SHA="$(git -C "$BASE_WT" rev-parse --short HEAD)"
+
+echo "======================================================================"
+echo "[CPU-AB-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  HEAD worktree: $HEAD_WT  ($HEAD_SHA)"
+echo "  BASE worktree: $BASE_WT  ($BASE_SHA)"
+echo "  預期 BASE=$EXPECT_BASE  HEAD=${EXPECT_HEAD:-（未指定）}"
+echo "  BASE 行數:     $(wc -l < "$BASE_WT/train_kolmogorov.py")  (重構前單體 + ledger 埋點)"
+echo "  HEAD 行數:     $(wc -l < "$HEAD_WT/train_kolmogorov.py")  (重構後入口)"
+echo "  JAX_PLATFORMS: ${JAX_PLATFORMS}   PILNJAX_ROOT: ${PILNJAX_ROOT}"
+echo "======================================================================"
+
+vc_cleanup "$HEAD_WT" "$BASE_WT" cpudet cpuab cpuoff
+
+# 在指定 worktree 錄一份 ledger。$1=worktree $2=fixture 名 $3=輸出子目錄
+# 本案的 ledger 直接落在 --artifacts_dir，不需事後搬移（cylinder 那側需要）。
+record () {
+  local wt="$1" name="$2" out="$3"
+  local -a extra=()
+  case "$name" in
+    f1) cfg=configs/_ledger_single_re.toml ;;
+    f2) cfg=configs/_ledger_f2.toml; extra=(--multi_re --sensor_dropout_rate 0.2) ;;
+    f3) cfg=configs/_ledger_single_re.toml; extra=(--rar_freq 3 --rar_warmup 5 --rar_pool_size 128) ;;
+    # f4：生產規模（寬度 256 + sensor query 分支）。前三份是刻意縮小的診斷 config，
+    #     只在特定張量形狀下才浮現的搬移錯誤，那個規模抓不到（§8.3）。
+    f4) cfg=configs/_ledger_prod_scale.toml ;;
+  esac
+  ( cd "$wt" && PYTHONPATH=. uv run python -u train_kolmogorov.py \
+      --config "$cfg" --steps 20 --seed 42 --arch liquid \
+      "${extra[@]}" --artifacts_dir "$out" --eval_every 0 ) > /dev/null 2>&1
+}
+
+# ─── (0) determinism control ────────────────────────────────────────────
+echo ""; echo "── (0) CPU determinism control：同碼兩跑 f1 ──"
+set +e
+record "$HEAD_WT" f1 artifacts/cpudet/a; R0A=$?
+record "$HEAD_WT" f1 artifacts/cpudet/b; R0B=$?
+set -e
+echo "[0] 兩跑 rc=${R0A}/${R0B}"
+[ "$R0A" -eq 0 ] && [ "$R0B" -eq 0 ] || {
+  echo "[0] determinism 錄製失敗（rc=${R0A}/${R0B}）——不往下跑" >&2; exit 2; }
+set +e
+vc_determinism "$HEAD_WT" artifacts/cpudet/a/rng_ledger.json artifacts/cpudet/b/rng_ledger.json
+R0=$?; set -e
+[ "$R0" != "0" ] && { echo "[0] rc=$R0，CPU 亦非決定性，位元對拍不可行"; exit 2; }
+echo "[0] determinism rc=0"
+
+# ─── (1)(2) 兩邊各錄四份 ─────────────────────────────────────────────────
+echo ""; echo "── (1) BASE（重構前）錄四份 ──"
+set +e
+RB=0
+for f in f1 f2 f3 f4; do
+  record "$BASE_WT" "$f" "artifacts/cpuab/$f"; rc=$?
+  [ "$rc" -eq 0 ] || RB=1
+  echo "   base/$f rc=${rc}"
+done
+echo "── (2) HEAD（重構後）錄四份 ──"
+RH=0
+for f in f1 f2 f3 f4; do
+  record "$HEAD_WT" "$f" "artifacts/cpuab/$f"; rc=$?
+  [ "$rc" -eq 0 ] || RH=1
+  echo "   head/$f rc=${rc}"
+done
+set -e
+echo "[1/2] base_rc=${RB} head_rc=${RH}"
+
+# ─── (2.5) 弱路徑門檻 ────────────────────────────────────────────────────
+echo ""; echo "── (2.5) 弱路徑門檻：replay 必須走 build_context、初始化 digest 必須真的比 ──"
+set +e
+vc_weak_path_gate "$HEAD_WT" kolmogorov tests/test_pipeline_replay.py
+RS=$?; set -e
+echo "[2.5] 弱路徑門檻 rc=${RS}"
+
+# ─── (2.7) ledger 關閉組態（production 組態）─────────────────────────────
+# 前面每一段都在 PILNN_RNG_LEDGER=1 下進行，而 production 是**關閉**的。
+# 關閉時沒有 ledger 可比，故標的改為落盤的 summary——其 final_metrics 由最終
+# params 算出，params 若不同必然反映出來。
+echo ""; echo "── (2.7) ledger 關閉組態（production 組態）──"
+recoff () {
+  ( cd "$1" && mkdir -p "$2" \
+    && env -u PILNN_RNG_LEDGER PYTHONPATH=. uv run python -u train_kolmogorov.py \
+         --config configs/_ledger_single_re.toml --steps 20 --seed 42 --arch liquid \
+         --artifacts_dir "$2" --eval_every 0 > "$2/stdout.txt" 2>&1 )
+}
+set +e
+recoff "$BASE_WT" artifacts/cpuoff/off; ROB=$?
+recoff "$HEAD_WT" artifacts/cpuoff/off; ROH=$?
+echo "[2.7] 兩邊 rc=${ROB}/${ROH}"
+[ "$ROB" -eq 0 ] && [ "$ROH" -eq 0 ] || { echo "[2.7] 錄製失敗" >&2; RO=1; }
+vc_ab_compare "$HEAD_WT" "$BASE_WT" off "" \
+  --summary-rel 'artifacts/cpuoff/{name}/summary.json'
+RO=$?; set -e
+echo "[2.7] ledger-off 對拍 rc=${RO}"
+
+# ─── (3) 對拍 ───────────────────────────────────────────────────────────
+echo ""; echo "── (3) BASE vs HEAD：commit 斷言 + 逐步 + digest + summary ──"
+EVIDENCE="$HEAD_WT/knowledge/superpowers/evidence/kolmo_ab_${SLURM_JOB_ID:-local}.json"
+set +e
+vc_ab_compare "$HEAD_WT" "$BASE_WT" f1,f2,f3,f4 "$EVIDENCE" \
+  --ledger-rel 'artifacts/cpuab/{name}/rng_ledger.json' \
+  --summary-rel 'artifacts/cpuab/{name}/summary.json'
+R3=$?; set -e
+
+echo ""
+echo "======================================================================"
+echo "[CPU-AB-{EXP_ID}] det=0  base_rc=${RB}  head_rc=${RH}  replay_strict=${RS}  ledger_off=${RO}  compare=${R3}"
+echo "  全部為 0 → 重構前後在 CPU 上逐位元相同（驗收層 A 通過）"
+echo "  證據：$EVIDENCE（請隨結論一併提交，讓第三人可複驗）"
+echo "======================================================================"
+exit $(( RB | RH | RS | RO | R3 ))

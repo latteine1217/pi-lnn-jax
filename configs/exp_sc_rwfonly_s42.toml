@@ -1,0 +1,87 @@
+# configs/exp_sc_rwfonly_s42.toml — TD-4 重驗的 scalar 操作點版本（2026-09-14 生成）
+# 來源：configs/exp_521_rwfonly.toml 逐字複製，**唯一變因是 attention_kind vector→scalar** + seed/artifacts_dir。
+# Why：arch-variants-reverify 的 n=4 裁決全部量在 attention_kind="vector" 上，
+#      而主線（exp_245_*／exp_301/302）吃預設 "scalar"，兩者已量到同 seed 配對完全分離
+#      （kolmogorov-attention-kind-2026-09-08.md，p=0.0143）。要把裁決套到主線必須在 scalar 上重跑。
+# configs/exp_521_rwfonly.toml — RWF-only ablation（v3 + rwf on）
+#
+# v3 差異（vs v2）：
+#   - refine phase 改用 L-BFGS（scalar loss + VJP gradient，無 jax.linearize）
+#   - GN 因 vector attention 模型 linearize JIT 編譯需 >18GiB 而 OOM，改用 LBFGS
+#   - 其餘訓練設定與 v2 完全相同
+
+[train]
+# ── 資料 ─────────────────────────────────────────────────────────────
+sensor_jsons = [
+  "data/sensors/re10000/sensors_les_qr_K100_N256_t0-20_si128.json",
+]
+re_values = [10000.0]
+time_strides = [8]
+dns_paths = [
+  "data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T20_dt1p95e4_si128_seed42.npy",
+]
+observed_sensor_channels = ["u", "v"]
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+# ── 模型架構（B3 + vector attention, no W_O）──────────────────────────
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 20.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 64
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+attention_kind = "scalar"   # ← 本批唯一變因：主線操作點
+
+# ── Loss weights ─────────────────────────────────────────────────────
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+# ── 訓練設定 ─────────────────────────────────────────────────────────
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 42
+artifacts_dir = "artifacts/kolmogorov/sc_rwfonly_s42"
+
+# ── LR schedule ────────────────────────────────────────────────────────
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+# ── GradNorm ───────────────────────────────────────────────────────────
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+
+# ablation: RWF-only（rwf ON, liquid-τ OFF）— 拆解 rwf/τ on 退步歸因
+use_rwf = true
+cfc_input_dependent_tau = false
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+# ── Augmented Lagrangian ───────────────────────────────────────────────
+al_rho = 0.1
+al_lambda_clip = 10.0
+al_update_freq = 100
+al_warmup_steps = 5000
+
+# ── SOAP betas ────────────────────────────────────────────────────────
+soap_betas = [0.9, 0.999]

@@ -1,0 +1,88 @@
+#!/bin/bash
+#SBATCH --job-name=jax_latprobe_{EXP_ID}
+#SBATCH --output=logs/jax_latprobe_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_latprobe_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# Latent（encoder 輸出 h_states）的跨時間 POD 秩。
+#
+# 為何要 GPU：GPU 寫的 ckpt 在 head node 的 CPU JAX 上 orbax 推不出 sharding。
+# 本 job **只跑 encoder**（不重建全場），所以比 resspec 那類便宜得多——
+# h_states 是 [T, K, d_model] 的一次 forward，沒有 T×256² 的 query 迴圈。
+# --time 仍給 12h 是照專案慣例（保證跑完 > 精準抓時間），不是估出來的。
+#
+# 判別的是什麼：重建場的秩已知比 DNS 場低（K=100 主線 n=5：r_99 22 對 25、
+# r_99.9 40 對 53）。latent 秩接近重建場 → 資訊在 encoder 就丟了；
+# 遠高於重建場 → latent 有而 decoder/query 路徑沒表達出來。修法完全不同。
+#
+# 環境變數：
+#   ARTIFACTS_DIR   ckpt 所在（必填，須與訓練一致）
+#   ARCH            只支援 liquid（必填；它是 sbatch env、不進 config）
+#   EVAL_PROTOCOL   follow_training / fixed_grid / sensor_time_independent（必填）
+#   PROTOCOL_REASON fixed_grid 必填
+#   EVAL_TIME_STRIDE 給了是斷言；不給由協定決定
+#   OUTPUT_SUBDIR   輸出子目錄（預設 latent_pod）
+#
+# 用法：
+#   ARTIFACTS_DIR=artifacts/kolmogorov/ksweep_k200_s42 ARCH=liquid \
+#   EVAL_PROTOCOL=follow_training \
+#   TMPL=scripts/slurm/diag_latent_linear_probe.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh latpod_k200s42 configs/exp_ksweep_k200_s42.toml
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+export UV_NO_SYNC=1        # 見 TD-27：離線 node 上 uv run 的預設同步永遠不可能成功
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+STRIDE="${EVAL_TIME_STRIDE:-}"   # 無預設：給了是斷言，沒給由協定決定
+PROTOCOL="${EVAL_PROTOCOL:?需指定 EVAL_PROTOCOL（follow_training / fixed_grid / sensor_time_independent）——無預設是刻意的}"
+PROTOCOL_REASON="${PROTOCOL_REASON:-}"
+PROTO_ARGS="--protocol ${PROTOCOL}"
+[ -n "$STRIDE" ] && PROTO_ARGS="${PROTO_ARGS} --time-stride ${STRIDE}"
+[ -n "$PROTOCOL_REASON" ] && PROTO_ARGS="${PROTO_ARGS} --protocol-reason ${PROTOCOL_REASON}"
+: "${ARTIFACTS_DIR:?需設 ARTIFACTS_DIR（ckpt 位置，須與訓練一致）}"
+: "${ARCH:?需設 ARCH（本 job 只支援 liquid）——它不進 config，必須顯式宣告}"
+SUBDIR="${OUTPUT_SUBDIR:-latent_probe}"
+OUT="${ARTIFACTS_DIR}/${SUBDIR}/latent_probe.json"
+
+echo "======================================================================"
+echo "[JAX-LATPROBE-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  config:        {CONFIG_PATH}"
+echo "  ARCH:          ${ARCH}"
+echo "  ARTIFACTS_DIR: ${ARTIFACTS_DIR}"
+echo "  PROTOCOL:      ${PROTOCOL}  stride=${STRIDE:-<by protocol>}"
+echo "  out:           ${OUT}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+# cuDNN preflight（防 venv 漂移白跑）
+uv run python -c "import jax, jax.numpy as jnp; from jax import lax; lax.conv_general_dilated(jnp.ones((1,8,8,1)), jnp.ones((3,3,1,1)), (1,1), 'SAME', dimension_numbers=('NHWC','HWIO','NHWC')).block_until_ready()" \
+  || { echo '[ERR] cuDNN preflight 失敗 → head node 跑 scripts/slurm/setup_gpu_venv.sh 後重送' >&2; exit 5; }
+
+uv run python -u scripts/diag_latent_linear_probe.py \
+  --config "{CONFIG_PATH}" \
+  --arch "${ARCH}" \
+  --artifacts-dir "${ARTIFACTS_DIR}" \
+  --pred "${PRED_FIELDS:?需設 PRED_FIELDS（decoder 輸出的 fields.npz，對照組）}" \
+  --split "${SPLIT:-gap2}" \
+  ${PROTO_ARGS} \
+  --out "${OUT}"
+
+echo "[$(date '+%F %T')] JAX-LATPROBE-{EXP_ID} 結束  →  ${OUT}"

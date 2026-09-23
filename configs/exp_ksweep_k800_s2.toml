@@ -1,0 +1,79 @@
+# configs/exp_ksweep_k800_s2.toml — K-sweep 5-seed campaign（派生自 exp_245k800_les_T50.toml）
+# K=800, training seed=2。5-seed 升級 tab:kscaling（原單 seed）。與 K=100 pv_les 同 regime。
+
+# configs/exp_245k800_les_T50.toml — K-sweep K=800 點（plateau 搜尋）
+#
+# What:
+#   EXP-245 (B3 + LES_T50 + Re=10000 + 20k) 的 K-sweep K=800 變體。與 exp_245_b3_les_T50.toml
+#   完全相同，僅 sensor 檔（K=800）、artifacts_dir、grad_accum_chunks 不同。
+#
+# Why:
+#   往更大 K 找 reconstruction error 飽和點。grad_accum_chunks=16：維持 K=200(M=4) 已驗證的
+#   per-chunk 記憶體（chunk=2000/16=125、125×800 = K=200 的 500×200 同級 ~5.5GB）。
+#   sensors 同 nested QR（K=800 = 前 800 QR-pivot pivots）。
+
+[train]
+sensor_jsons = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K800_N256_t0-5_si100_les_n256_T50standalone.json",
+]
+sensor_npzs = [
+  "data/kolmogorov_sensors/re10000/sensors_qrpivot_K800_N256_t0-5_si100_les_n256_T50standalone_dns_values.npz",
+]
+dns_paths = ["data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T5_dt2p5e4_si100_ds4.npy"]
+re_values = [10000.0]
+observed_sensor_channels = ["u", "v"]
+
+fourier_embed_dim = 128
+use_temporal_anchor = true
+T_total = 5.0
+temporal_anchor_harmonics = 2
+d_model = 256
+d_time = 16
+num_spatial_encoder_layers = 1
+num_temporal_cfc_layers = 1
+num_token_attention_layers = 2
+token_attention_heads = 4
+num_query_mlp_layers = 1
+query_mlp_hidden_dim = 256
+output_head_gain = 1.0
+operator_rank = 256
+domain_length = 1.0
+kolmogorov_k_f = 2.0
+kolmogorov_A = 0.1
+
+data_loss_weight = 1.0
+physics_loss_weight = 1.0
+poisson_loss_weight = 0.0
+t_early_weight = 10.0
+t_early_threshold = 0.05
+
+iterations = 20000
+num_physics_points = 1024
+num_sensor_query_points = 2000
+grad_accum_chunks = 16
+learning_rate = 1e-3
+max_grad_norm = 1.0
+checkpoint_period = 500
+seed = 2
+artifacts_dir = "artifacts/kolmogorov/ksweep_k800_s2"
+
+lr_warmup_steps = 2000
+lr_decay_steps = 2000
+lr_decay_gamma = 0.9
+min_learning_rate = 1e-6
+
+use_gradnorm = true
+gradnorm_freq = 1000
+gradnorm_min_weight = 0.05
+gradnorm_max_weight = 0.0
+gradnorm_init_weights = [1.0, 0.057, 0.057]
+gradnorm_ema_momentum = 0.9
+
+al_update_freq = 100
+soap_betas = [0.9, 0.999]
+al_rho = 0.1
+al_lambda_clip = 10.0
+
+# legacy 鎖定（model keys；schema 預設已改 use_rwf/cfc_input_dependent_tau=on，此處明示保留舊架構）
+use_rwf = false
+cfc_input_dependent_tau = false

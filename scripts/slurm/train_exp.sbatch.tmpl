@@ -1,0 +1,185 @@
+#!/bin/bash
+#SBATCH --job-name=jax_exp_{EXP_ID}
+#SBATCH --output=logs/jax_exp_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_exp_{EXP_ID}_%j.err
+#SBATCH --time=14-00:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# What:
+#   pi-lnn-jax (JAX/Flax POC) 訓練通用 sbatch template；由 scripts/slurm/submit_exp.sh
+#   把實驗編號與 config 路徑替換後送 slurm。對齊 pi-lnn/scripts/slurm/train_exp.sbatch.tmpl
+#   的資源配額與環境檢查邏輯，差別只在訓練主程式 (train_kolmogorov.py vs picon_kolmogorov.py)。
+#
+# Why:
+#   - 單一 template，job-name/output/error 隨 EXP_ID 自動帶入；避免每個實驗手抄 sbatch。
+#   - 資源規劃對齊 pi-lnn (acmt20 = 48 CPU / 112 GB / 2 GPU)：
+#       2 × GPU = 2  ≤ 2   ✓
+#       2 × 8 CPU = 16 ≤ 48  ✓
+#       2 × 48 GB = 96 GB ≤ 112 GB  ✓
+#     讓 pi-lnn 與 pi-lnn-jax 兩個訓練能同節點並行。
+#   - 訓練主程式：train_kolmogorov.py（CLI override TOML override schema default）
+#   - device 用 cuda；lab-server 環境無 MPS。
+#
+# Notes:
+#   - --time 用 slurm 標準 D-HH:MM:SS 格式
+#   - submit_exp.sh 把 {EXP_ID} 與 {CONFIG_PATH} sed 替換後 sbatch
+#   - CLI flag 對齊 EXP-245 (B3 + LES + Re=10000 + 20k iter)；
+#     若跑其他 config 需要不同 flag，請複製 template 改 EXTRA_FLAGS 區。
+
+set -euo pipefail
+
+# ─── 1. 進到 repo root ────────────────────────────────────────────────
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+# ─── 2. 環境 ──────────────────────────────────────────────────────────
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+# pi-lnn data root（sensor JSON/NPZ + DNS .npy）— lab-server 端路徑覆寫 Mac 預設
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+# 確保 uv 在 PATH（lab-server 可能裝在 ~/.local/bin 或 ~/.cargo/bin）
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH；先在 lab-server 裝 uv" >&2; exit 2; }
+# Compute node 通常無 internet；強制 uv offline 並要求 head node 已預跑
+# 'uv sync' 將 .venv + Python 預備好。違反此假設立即 fail。
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；請先在 head node 跑 'uv sync --python 3.12'" >&2; exit 3; }
+
+# JAX CUDA 設定（lab-server jax[cuda12] 已 wheel-installed）
+export JAX_PLATFORMS=cuda
+# 90% GPU memory pre-allocation（JAX 預設）可能與其他 job 衝突；改 false 讓 JAX 按需配置
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+# ─── 3. 列印環境摘要（方便事後 debug log） ────────────────────────────
+echo "======================================================================"
+echo "[JAX-EXP-{EXP_ID}] $(date '+%F %T')  slurm_job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  repo:      $(pwd)"
+echo "  config:    {CONFIG_PATH}"
+echo "  cuda vis:  ${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "  cpus:      ${SLURM_CPUS_PER_TASK:-?}"
+echo "  mem:       ${SLURM_MEM_PER_NODE:-?} MB"
+echo "  JAX_PLATFORMS=${JAX_PLATFORMS}  preallocate=${XLA_PYTHON_CLIENT_PREALLOCATE}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv --version
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+
+# ─── 3.5 preflight：cuDNN compile smoke（防 cuDNN drift 白跑整個 job）──────
+# compile 一個會走 cuDNN 的 conv。若 venv 漂移到壞版本（如 nvidia-cudnn-cu12 9.23.1.3
+# 與 jaxlib 0.10.1 不相容），這裡秒級 abort 並帶明確修法，而非訓練到第一步才丟難解的
+# XLA `dnn_support != nullptr` RET_CHECK。修法：head node 跑 scripts/slurm/setup_gpu_venv.sh。
+echo "[preflight] cuDNN compile smoke..."
+uv run python -c "import jax, jax.numpy as jnp; from jax import lax; lax.conv_general_dilated(jnp.ones((1,8,8,1)), jnp.ones((3,3,1,1)), (1,1), 'SAME', dimension_numbers=('NHWC','HWIO','NHWC')).block_until_ready(); print('[preflight] cuDNN OK')" \
+  || { echo '[ERR] cuDNN/GPU preflight 失敗（多半 nvidia-cudnn-cu12 漂到 9.23.1.3）→ head node 跑 scripts/slurm/setup_gpu_venv.sh 重建 venv（pin 9.23.0.39）後重送' >&2; exit 5; }
+
+# ─── 4. 訓練 ──────────────────────────────────────────────────────────
+# CLI flag 對應 pi-lnn EXP-245 機制：
+#   --arch liquid              B3 full architecture
+#   --optimizer schedule_free  SOAP/ScheduleFree（lr_schedule="soap", use_schedule_free=true）
+#   --use_gradnorm             啟用 GradNorm 動態權重
+#   --use_al                   啟用 Augmented Lagrangian for continuity
+#   --use_time_marching        時間 marching curriculum
+#   --tm_start_frac 0.1        比例值，非絕對時間：0.1 × T_total(=5) → t_start=0.5，
+#                              才是對齊 pi-lnn 的 time_marching_start=0.5。
+#                              （此註解原寫 0.5，與下方實際傳入的 0.1 不符。）
+#   --tm_warmup_steps 2000     對齊 pi-lnn time_marching_warmup_steps=2000
+#   --tm_ramp_steps 6000       fixed-step ramp（pi-lnn 用比例 0.3 → 6000 步 / 20k iter）
+#   --eval_every 2000          訓練中段 eval (注意：train_kolmogorov.py 預設 DNS 是 Re=1000，
+#                              對 Re=10000 baseline 用 scripts/evaluate_exp245.py 跑 final eval)
+#   --save_every 500           對齊 pi-lnn checkpoint_period=500
+#   --refine_optimizer lbfgs   訓練結束 LBFGS refinement phase
+#   --refine_steps 100
+#
+# ARTIFACTS_DIR env var：若 caller export ARTIFACTS_DIR，train 與 eval 共用該路徑（覆蓋 TOML）；
+#   未設時走 TOML 預設。smoke / sweep 跑多版本時必設此 env 避免互相覆蓋。
+#
+# EVAL_TIME_STRIDE env var：覆寫 evaluate_exp245.py 的 --time-stride（該 script 預設 2）。
+#   未設時行為不變。跨-Re 比較時必設：各 Re 的參考 DNS 原始取樣率不同，eval 的時間格點
+#   要對齊才可並列。EXP-245 的 DNS 為 201 frames @ Δt=0.025，預設 stride=2 → 101 點
+#   @ Δt=0.05；EXP-301 (Re=1000) 的 DNS 為 101 frames @ Δt=0.05，需 stride=1 才同為
+#   101 點 @ Δt=0.05，否則會落在 51 點 @ Δt=0.1。
+# ARCH env：預設 liquid (B3)；實驗2 B0 baseline 用 ARCH=vanilla。train 與 eval 共用同一 arch。
+ARCH="${ARCH:-liquid}"
+echo "[env] ARCH = ${ARCH}"
+TRAIN_EXTRA_ARGS=""
+EVAL_EXTRA_ARGS=""
+if [ -n "${ARTIFACTS_DIR:-}" ]; then
+  TRAIN_EXTRA_ARGS="--artifacts_dir ${ARTIFACTS_DIR}"
+  EVAL_EXTRA_ARGS="--artifacts_dir ${ARTIFACTS_DIR}"
+  echo "[env] ARTIFACTS_DIR override = ${ARTIFACTS_DIR}"
+fi
+if [ -n "${EVAL_TIME_STRIDE:-}" ]; then
+  EVAL_EXTRA_ARGS="${EVAL_EXTRA_ARGS} --time-stride ${EVAL_TIME_STRIDE}"
+  echo "[env] EVAL_TIME_STRIDE override = ${EVAL_TIME_STRIDE}"
+fi
+# SENSOR_DROPOUT_RATE env：實驗2 train-time sensor dropout（未設 / 0 → 不傳，行為 bit-identical）。
+# 訓練後的自動 eval 刻意保持全-K：train-time-augmented 模型的 robustness 由獨立 eval-time
+# sweep 在同一組 dropout rate 下統一測，才與其他模型公平對照（勿在此對訓練 rate 偷跑 eval）。
+if [ -n "${SENSOR_DROPOUT_RATE:-}" ] && [ "${SENSOR_DROPOUT_RATE}" != "0" ] && [ "${SENSOR_DROPOUT_RATE}" != "0.0" ]; then
+  TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS} --sensor_dropout_rate ${SENSOR_DROPOUT_RATE}"
+  echo "[env] SENSOR_DROPOUT_RATE (train-time) = ${SENSOR_DROPOUT_RATE}"
+fi
+# TRAIN_FLAGS env：原樣附加到訓練指令的額外 flag，給「只存在於 CLI、沒有 config 欄位」
+# 的消融用（例如 --ablate_no_al：AL 開關由 CLI 決定，TOML 無對應鍵）。未設時完全不動
+# 指令，行為 bit-identical。有 config 欄位可表達的參數請走 config，不要塞進這裡——
+# 那會讓實驗設定散在 sbatch 環境變數裡，config 不再是該次跑的完整描述。
+if [ -n "${TRAIN_FLAGS:-}" ]; then
+  TRAIN_EXTRA_ARGS="${TRAIN_EXTRA_ARGS} ${TRAIN_FLAGS}"
+  echo "[env] TRAIN_FLAGS = ${TRAIN_FLAGS}"
+fi
+# EVAL_FLAGS env：同上，但作用於訓練後的 final eval。間歇 sensor 實驗需要
+# --sensor-time-independent（sensor 時間軸刻意不等距，與 DNS 格點無關）。
+if [ -n "${EVAL_FLAGS:-}" ]; then
+  EVAL_EXTRA_ARGS="${EVAL_EXTRA_ARGS} ${EVAL_FLAGS}"
+  echo "[env] EVAL_FLAGS = ${EVAL_FLAGS}"
+fi
+
+#
+# 對齊 pi-lnn EXP-245 (slurm 3576) 做 apples-to-apples wall time 比較：
+#   - 都跑 schedule_free + GradNorm + AL + time_marching + 20k iter
+#   - pi-lnn 端沒 refine、沒 in-training eval（從 3576 log "=== Done ===" 確認）
+#     → 故 jax 端也設 --eval_every 0 + --refine_optimizer none
+#   - sbatch 結尾接續 scripts/evaluate_exp245.py 做 Re=10000 DNS 對照（不計入 train wall）
+uv run python -u train_kolmogorov.py \
+  --config "{CONFIG_PATH}" \
+  --arch "${ARCH}" \
+  --optimizer schedule_free \
+  --base_optimizer soap \
+  --soap_precondition_frequency 2 \
+  --use_gradnorm \
+  --use_al \
+  --use_time_marching \
+  --tm_start_frac 0.1 \
+  --tm_warmup_steps 2000 \
+  --tm_ramp_steps 6000 \
+  --eval_every 0 \
+  --save_every 1000 \
+  --log_every 500 \
+  --refine_optimizer none \
+  ${TRAIN_EXTRA_ARGS}
+
+TRAIN_RC=$?
+echo "[$(date '+%F %T')] JAX-EXP-{EXP_ID} 訓練結束 rc=${TRAIN_RC}"
+
+# ─── 5. 自動跑 Re=10000 DNS eval（解 train_kolmogorov.py 預設 Re=1000 寫死問題） ──
+if [ "${TRAIN_RC}" = "0" ]; then
+  echo "[$(date '+%F %T')] 啟動 scripts/evaluate_exp245.py final eval"
+  # --optimizer 必須與 train_kolmogorov.py 一致（orbax restore 對 opt_state 結構嚴格檢查）
+  uv run python -u scripts/evaluate_exp245.py \
+    --protocol follow_training \
+    --config "{CONFIG_PATH}" \
+    --ckpt latest \
+    --arch "${ARCH}" \
+    --optimizer schedule_free \
+    --base_optimizer soap \
+    --soap_precondition_frequency 2 \
+    ${EVAL_EXTRA_ARGS} \
+    || echo "[WARN] eval script 失敗 (rc=$?)；訓練 ckpt 仍保留可手動 retry"
+fi
+
+exit "${TRAIN_RC}"

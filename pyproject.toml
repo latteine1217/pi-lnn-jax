@@ -1,0 +1,54 @@
+[project]
+name = "kolmogorov-pi-lnn-poc"
+version = "0.0.1"
+description = "POC: port pi-lnn CfC + DeepONet decoder to JAX/Flax to quantify drift vs PyTorch baseline."
+requires-python = ">=3.11,<3.14"
+
+# What: 與 jaxpi 主 pyproject 隔離，避免 jax[cuda12] 在 macOS 上 wheel 找不到。
+# Why: POC 目標是「驗證 architectural numerical equivalence」，CPU jax 已足。
+#      若 POC pass，再切到 Linux GPU 並使用主 jaxpi env 跑完整 baseline。
+dependencies = [
+  "jax>=0.4.30",
+  "jaxlib>=0.4.30",
+  "flax>=0.10",
+  "optax>=0.2",
+  "numpy>=1.26",
+  "scipy>=1.13",
+  "optimistix>=0.1.0",  # Wave 5 refiners: LBFGS + Levenberg-Marquardt
+  "chex>=0.1.85",  # soap-jax 依賴
+  "folx>=0.2.22",  # collapsed forward-Laplacian（預設 AD mode；NeurIPS-2025 Collapsing Taylor）
+  # SOAP optimizer (--base_optimizer soap)；非 PyPI，git 安裝。
+  # 注意：GPU 的 jax[cuda12] plugin 仍為 out-of-band 手動安裝（不在此 lock）；
+  #       fresh `uv sync` 只裝 CPU jax，GPU 環境需另行補 cuda plugin。
+  "soap-jax @ git+https://github.com/haydn-jones/SOAP_JAX",
+  "matplotlib>=3.10.9",
+  # cylinder 前處理（RealPDEBench Arrow shard → 本專案 npz 契約）。
+  # 2026-08-21 從 pi-lnn 移植 qrpivot/CylinderDataset 後，這條路不再借 pi-lnn 的 venv。
+  "pyarrow>=15.0",
+]
+
+# What: 開發工具（測試與 lint），走 PEP 735 dependency-groups，`uv sync` 預設會裝。
+# Why: 它們原本是 out-of-band 安裝，不在任何 lock 裡——任何一次 `uv sync`（包括
+#      scripts/slurm/setup_gpu_venv.sh 內部那次）都會把它們連同其他 out-of-band
+#      套件一起清掉，然後 `pytest` 就消失了。放進這裡讓 sync 自己補回來。
+# Why xdist: 全套件 1101 項的 91.5% 時間集中在最慢 80 項，且那些項的成本是 XLA
+#      編譯而非計算（最小模型 d_model=16 仍要 13s）。單進程 280s；xdist 併上
+#      JAX 持久化編譯快取（worker 之間共用編譯結果）後 55s。快取那三個環境變數
+#      缺一不可，見 CLAUDE.md §5——只加 xdist 只到 176s。
+[dependency-groups]
+dev = [
+  "pytest>=9.0",
+  "pytest-xdist>=3.6",
+  "ruff>=0.16",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# soap-jax 為 git 直接引用依賴；hatchling 需顯式允許 direct references。
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["pi_lnn_jax"]

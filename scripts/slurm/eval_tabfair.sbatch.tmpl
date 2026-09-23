@@ -1,0 +1,116 @@
+#!/bin/bash
+#SBATCH --job-name=jax_tabfair_{EXP_ID}
+#SBATCH --output=logs/jax_tabfair_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_tabfair_{EXP_ID}_%j.err
+#SBATCH --time=04:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#
+# What:
+#   tab:fair 的三個 classical baseline（RBF / IDW / div-free trig LSQ）的 sbatch template。
+#   由 scripts/slurm/submit_exp.sh（TMPL 覆寫）把 {EXP_ID}/{CONFIG_PATH} 替換後送 slurm。
+#
+# Why CPU-only:
+#   三個方法都是 numpy/scipy 的逐幀空間重建，不需 GPU；JAX_PLATFORMS=cpu 讓
+#   pi_lnn_jax 的 jax import 走 CPU，把卡留給訓練 job。
+#
+# Why 吃 SENSOR_JSON/DNS_PATH/RE 而非 config:
+#   classical_baselines_fair.py 取的是**單一 Re 的顯式三件組**（它不走
+#   resolve_re_inputs）。{CONFIG_PATH} 在此只進 banner 當出處紀錄，不被腳本讀。
+#   RE 未給就不產出 band/γ 欄位——腳本刻意不從檔名猜 Re，這裡也不代它猜。
+#
+# Usage（lab-server head node；先 uv sync --python 3.12）:
+#   SENSOR_JSON=data/sensors/... DNS_PATH=data/dns/... RE=10000 \
+#   OUTPUT=artifacts/baseline_eval/tabfair_head.json \
+#   TMPL=scripts/slurm/eval_tabfair.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh tabfairhead configs/eval_multi_re_train5_crp.toml
+#
+#   加跑 gappy-POD：另給 LES_BASIS（placement LES 全場 .npy）。basis 只能是 LES——
+#   用 DNS 建 basis 會讓這張表失去 sensor-only 前提。LES_TIME_STRIDE / POD_MODES 可選。
+#   再加 PROJECTION_FLOOR=1 會多評 les_projection_floor_m<r>：參考場對同一組 POD 基底的
+#   正交投影，即係數擬合完美時仍會留下的誤差。**該列讀參考場**，不是 sensor-only
+#   baseline，不得與其餘列並列為對照；它的用途是界定 gappy 那一列的下限。
+#   PROJECTION_FLOOR_MODES="150 400" 一次掃多個秩（一次 SVD）；秩超過快照數撐得起的
+#   範圍即失敗，不靜默截短。PROJECTION_FLOOR_DNS_MEAN=1 另評把 LES 時均場換成 DNS
+#   時均場的變體（模態不變），用來分離「基底方向不對」與「兩流場平均量不同」。
+#
+# Output:
+#   - slurm log：logs/jax_tabfair_{EXP_ID}_<jobid>.out / .err
+#   - 投影 JSON：${OUTPUT}；每個 method 另落一份 metric artifact 在同目錄
+
+set -euo pipefail
+
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_ROOT="${PILNJAX_ROOT:-$(pwd)}"
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+{ [ -d "$PILNJAX_ROOT/data" ] || [ -d "$PILNJAX_DATA_ROOT/data" ]; } \
+  || { echo "[ERR] 找不到 data/（PILNJAX_ROOT=$PILNJAX_ROOT 或 PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT）" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；先在 head node 跑 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cpu
+
+PROTOCOL="${PROTOCOL:?需指定 PROTOCOL（follow_training / fixed_grid / sensor_time_independent）；\n\
+  無預設是刻意的：預設會讓人吃到錯的那一個，而錯的不會 crash、只會在別的時間解析度上算數字}"
+PROTOCOL_REASON="${PROTOCOL_REASON:-}"
+SENSOR_TIME_STRIDE="${SENSOR_TIME_STRIDE:-}"
+PROTO_ARGS="--protocol ${PROTOCOL}"
+[ -n "$PROTOCOL_REASON" ] && PROTO_ARGS="${PROTO_ARGS} --protocol-reason ${PROTOCOL_REASON}"
+[ -n "$SENSOR_TIME_STRIDE" ] && PROTO_ARGS="${PROTO_ARGS} --sensor-time-stride ${SENSOR_TIME_STRIDE}"
+SENSOR_JSON="${SENSOR_JSON:?需指定 SENSOR_JSON（單一 Re 的 sensor JSON）}"
+DNS_PATH="${DNS_PATH:?需指定 DNS_PATH（同一 Re 的 DNS npy）}"
+RE="${RE:-}"
+OUTPUT="${OUTPUT:-artifacts/baseline_eval/{EXP_ID}_tabfair.json}"
+
+# gappy-POD 為 opt-in：不給 LES_BASIS 時傳給腳本的參數與本區塊存在前逐字相同。
+LES_BASIS="${LES_BASIS:-}"
+LES_ARGS=""
+if [ -n "$LES_BASIS" ]; then
+  LES_ARGS="--les-basis ${LES_BASIS}"
+  [ -n "${LES_TIME_STRIDE:-}" ] && LES_ARGS="${LES_ARGS} --les-time-stride ${LES_TIME_STRIDE}"
+  [ -n "${POD_MODES:-}" ] && LES_ARGS="${LES_ARGS} --pod-modes ${POD_MODES}"
+  if [ "${PROJECTION_FLOOR:-0}" = "1" ]; then
+    LES_ARGS="${LES_ARGS} --projection-floor"
+    # 空白分隔的多個秩，例如 PROJECTION_FLOOR_MODES="150 400"。未給則沿用 gappy 的秩。
+    [ -n "${PROJECTION_FLOOR_MODES:-}" ] && LES_ARGS="${LES_ARGS} --projection-floor-modes ${PROJECTION_FLOOR_MODES}"
+    [ "${PROJECTION_FLOOR_DNS_MEAN:-0}" = "1" ] && LES_ARGS="${LES_ARGS} --projection-floor-dns-mean"
+  fi
+fi
+
+RE_ARG=""
+if [ -n "$RE" ]; then
+  RE_ARG="--re ${RE}"
+else
+  echo "[WARN] 未給 RE → band_rel_err_*/gamma_* 欄位不會產出"
+fi
+
+echo "======================================================================"
+echo "[JAX-TABFAIR-{EXP_ID}] $(date '+%F %T')  slurm_job=${SLURM_JOB_ID}  node=${SLURMD_NODENAME:-?}"
+echo "  repo:      $(pwd)"
+echo "  provenance config: {CONFIG_PATH}（僅紀錄，腳本不讀）"
+echo "  sensor:    ${SENSOR_JSON}"
+echo "  dns:       ${DNS_PATH}"
+echo "  Re:        ${RE:-<unset>}"
+echo "  output:    ${OUTPUT}"
+echo "  protocol:  ${PROTOCOL}   reason: ${PROTOCOL_REASON:-<none>}"
+echo "  les basis: ${LES_BASIS:-<none, gappy off>}"
+echo "  JAX_PLATFORMS=${JAX_PLATFORMS}  cpus=${SLURM_CPUS_PER_TASK:-?}  mem=${SLURM_MEM_PER_NODE:-?}MB"
+echo "======================================================================"
+uv --version
+
+uv run python -u scripts/classical_baselines_fair.py \
+  --sensor-json "${SENSOR_JSON}" \
+  --dns-path "${DNS_PATH}" \
+  --output "${OUTPUT}" \
+  ${PROTO_ARGS} \
+  ${RE_ARG} \
+  ${LES_ARGS}
+
+echo "[$(date '+%F %T')] JAX-TABFAIR-{EXP_ID} 完成 → ${OUTPUT}"

@@ -1,0 +1,167 @@
+#!/bin/bash
+#SBATCH --job-name=jax_enkf_{EXP_ID}
+#SBATCH --output=logs/jax_enkf_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_enkf_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
+#
+# EnKF 資料同化基線的**敏感度掃描**；CPU-only（純 numpy，同 eval_gappy_cross_re）。
+#
+# 為什麼是掃描而不是單點：`pi_lnn_jax/enkf.py` 的模組 docstring 明講
+# 「localization 與 inflation 是能不能跑的前提，不是調參選項……兩者的參數會影響
+# 結果，故應掃描並報告敏感度，而不是挑一組好看的」。thesis chapter04.tex:512
+# 原本報的是單一組態，而那組的紀錄已不存在（AUDIT.md §4.1）——重跑若又只報一個
+# 好看的點，等於把同一個問題再犯一次。
+#
+# 送出（lab-server head node）：
+#   PROTOCOL=sensor_time_independent \
+#   TMPL=scripts/slurm/enkf_baseline.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh enkf configs/eval_multi_re_train5_crp.toml
+#   DRY=1 ... 只印計畫
+#
+# 若叢集要求 r740 job 帶 GPU 才排程，再加 #SBATCH --gres=gpu:1。
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_ROOT="${PILNJAX_ROOT:-$(pwd)}"
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+{ [ -d "$PILNJAX_ROOT/data" ] || [ -d "$PILNJAX_DATA_ROOT/data" ]; } \
+  || { echo "[ERR] 找不到 data/（PILNJAX_ROOT=$PILNJAX_ROOT 或 PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT）" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；先在 head node 跑 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cpu
+
+PROTOCOL="${PROTOCOL:?需指定 PROTOCOL（follow_training / fixed_grid / sensor_time_independent）——無預設是刻意的}"
+PROTOCOL_REASON="${PROTOCOL_REASON:-}"
+# 陣列而非字串：reason 含空白時字串展開會被拆成多個引數，而 argparse 只會抱怨
+# 「多餘的位置引數」——看起來像用法錯，實際是引號漏了。
+PROTO_ARGS=(--protocol "${PROTOCOL}")
+[ -n "$PROTOCOL_REASON" ] && PROTO_ARGS+=(--protocol-reason "${PROTOCOL_REASON}")
+# follow_training 才需要 config 決定 time_strides；其餘模式不傳，避免暗示它有作用
+CONFIG_ARG=()
+[ "$PROTOCOL" = "follow_training" ] && CONFIG_ARG=(--config "{CONFIG_PATH}")
+
+# 時間軸：對齊已紀錄的 cross-Re classical baseline 實跑
+# （lab-server logs/sbatch/classical_crossre.sbatch，2026-08-01 那批）——
+# 該支對 Re=1000 傳 --sensor-time-stride 1 且 --max-grid 128。EnKF driver 固定
+# grid_stride=1/max_grid=0；在 N=128 上 choose_grid_stride(128, max_grid=128)=1，
+# 兩者同格，故評估網格一致。sensor_T 沿用該支的預設 200（該 sensor 檔只有 104 幀）。
+SENSOR_TIME_STRIDE="${SENSOR_TIME_STRIDE:-1}"
+SENSOR_T="${SENSOR_T:-200}"
+
+# ── 這個 case 綁定的量：對照 chapter04 的 cross-Re sweep ────────────────
+# sensor 檔的判定依據（AUDIT.md §4.1）：method=farthest_point_sampling_periodic
+# 對應內文的 "coverage-optimal farthest-point placement"；time_steps=104 對應
+# "101 ± 4 frames"；source_file 指向 cross_re 的 T=10.3 "matched" DNS。
+SENSOR="${SENSOR:-data/kolmogorov_sensors/re1000/sensors_spacefill_K100_N128_Re1000_matched.json}"
+DNS="${DNS:-data/dns/cross_re/kolmogorov_dns_Re1000_N128_T10p3_matched.npy}"
+RE="${RE:-1000}"
+# k_f / A 是產生該 DNS 的 forcing，不是可調項；值見 chapter03 tab:dns_params。
+K_F=2
+FORCING_AMPLITUDE=0.1
+
+# ── 固定的濾波器設定（非掃描軸）──────────────────────────────────────
+# obs_err_frac：對齊 Hasegawa 2023 報的觀測誤差水準（該篇此數與內文相符，
+# 見 AUDIT.md §4.1；不相符的是 member 數）。
+OBS_ERR_FRAC="${OBS_ERR_FRAC:-0.10}"
+# solver_dt 必須整除觀測間隔，否則 driver 直接失敗（不湊整）。
+# dt_obs=0.1（sensor_dt，stride 1）÷ 2.5e-3 = 40 步／區間。
+# 穩定性：N=128 → dx=1/128，|u|~O(1) 的平流 CFL 上限約 7.8e-3，IF-RK4 再留餘裕。
+SOLVER_DT="${SOLVER_DT:-2.5e-3}"
+# thesis 捨棄前半視窗為 spin-up；此處沿用以便與原數字可比。
+SPINUP_FRAC="${SPINUP_FRAC:-0.5}"
+# 初始 ensemble：帶限隨機場 + 自由演化。burn-in 取約兩個 eddy turnover
+# （t_eddy≈T/5≈2.06 s → 4 s ÷ 2.5e-3 = 1600 步），讓 ensemble 先走上受迫吸引子，
+# 使結果不敏感於初始振幅與截斷波數。初始場不含任何真值資訊。
+INIT_K_CUT="${INIT_K_CUT:-8}"
+INIT_AMPLITUDE="${INIT_AMPLITUDE:-1.0}"
+INIT_BURNIN_STEPS="${INIT_BURNIN_STEPS:-1600}"
+INFLATION="${INFLATION:-1.02}"
+SEED="${SEED:-0}"
+
+# ── 掃描軸 ────────────────────────────────────────────────────────────
+# N_e：96 是 thesis 目前寫的值，64 是 Hasegawa 用過的最大 ensemble
+#      （該篇用 M=4/16/64 並結論 64 已足夠），16 用來看趨勢。
+# loc_radius：局域化半徑，模組 docstring 指定要報敏感度的兩個參數之一。
+N_MEMBERS_LIST="${N_MEMBERS_LIST:-16 64 96}"
+LOC_RADIUS_LIST="${LOC_RADIUS_LIST:-0.15 0.3 0.5}"
+
+OUTDIR="${OUTDIR:-artifacts/baseline_eval/enkf_{EXP_ID}}"
+mkdir -p "$OUTDIR"
+
+# MODE=drift：只量 forward model 的單區間漂移，不跑同化掃描。
+# 這個量回答「從參考快照出發，一個觀測間隔後偏離多少」，是 forward model 的
+# 模型誤差，與 ensemble／局域化／觀測噪音無關，故不需要濾波器旋鈕。
+if [ "${MODE:-sweep}" = "drift" ]; then
+  echo "[JAX-ENKF-{EXP_ID}] MODE=drift  $(date '+%F %T') job=${SLURM_JOB_ID:-<none>}"
+  uv run python -u scripts/enkf_baseline.py \
+    --forecast-drift-only \
+    "${PROTO_ARGS[@]}" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} \
+    --sensor-time-stride "${SENSOR_TIME_STRIDE}" --sensor-T "${SENSOR_T}" \
+    --sensor-json "${SENSOR}" --dns-path "${DNS}" \
+    --re "${RE}" --k-f "${K_F}" --forcing-amplitude "${FORCING_AMPLITUDE}" \
+    --solver-dt "${SOLVER_DT}" \
+    --output "${OUTDIR}/forecast_drift.json"
+  echo "[$(date '+%F %T')] JAX-ENKF-{EXP_ID} drift 完成"
+  exit 0
+fi
+
+echo "[JAX-ENKF-{EXP_ID}] $(date '+%F %T') job=${SLURM_JOB_ID:-<none>} node=${SLURMD_NODENAME:-?}"
+echo "  sensor   = ${SENSOR}"
+echo "  dns      = ${DNS}"
+echo "  protocol = ${PROTOCOL}${PROTOCOL_REASON:+ (${PROTOCOL_REASON})}"
+echo "  time     = stride=${SENSOR_TIME_STRIDE} sensor_T=${SENSOR_T}"
+echo "  sweep    = N_e{${N_MEMBERS_LIST}} x loc{${LOC_RADIUS_LIST}}   fixed: infl=${INFLATION} dt=${SOLVER_DT} seed=${SEED}"
+uv --version
+
+fail=0
+for NE in ${N_MEMBERS_LIST}; do
+  for LOC in ${LOC_RADIUS_LIST}; do
+    tag="ne${NE}_loc${LOC}"
+    out="${OUTDIR}/enkf_${tag}.json"
+    echo "──────── ${tag} ────────"
+    # 單一 cell 失敗不終止整個掃描：發散本身是敏感度結果的一部分，
+    # 但必須在最後大聲彙報，不能安靜漏掉一格。
+    if uv run python -u scripts/enkf_baseline.py \
+        "${PROTO_ARGS[@]}" ${CONFIG_ARG[@]+"${CONFIG_ARG[@]}"} \
+        --sensor-time-stride "${SENSOR_TIME_STRIDE}" \
+        --sensor-T "${SENSOR_T}" \
+        --sensor-json "${SENSOR}" \
+        --dns-path "${DNS}" \
+        --re "${RE}" \
+        --k-f "${K_F}" \
+        --forcing-amplitude "${FORCING_AMPLITUDE}" \
+        --n-members "${NE}" \
+        --obs-err-frac "${OBS_ERR_FRAC}" \
+        --inflation "${INFLATION}" \
+        --loc-radius "${LOC}" \
+        --solver-dt "${SOLVER_DT}" \
+        --spinup-frac "${SPINUP_FRAC}" \
+        --init-k-cut "${INIT_K_CUT}" \
+        --init-amplitude "${INIT_AMPLITUDE}" \
+        --init-burnin-steps "${INIT_BURNIN_STEPS}" \
+        --seed "${SEED}" \
+        --output "${out}"; then
+      echo "[ok] ${tag} → ${out}"
+    else
+      echo "[FAIL] ${tag}（見上方 traceback）" >&2
+      fail=$((fail + 1))
+    fi
+  done
+done
+
+echo "======================================================================"
+echo "[sweep] 完成，失敗 ${fail} 格。產物在 ${OUTDIR}/"
+ls -1 "${OUTDIR}" || true
+echo "[next] 敏感度表由 read 側彙整（result_table / read_metric_summary），"
+echo "       不要在本 heredoc 內寫判定——那段程式只在 job 內跑，本機測不到。"
+[ "$fail" -eq 0 ] || { echo "[ERR] 有 ${fail} 格失敗" >&2; exit 5; }
+echo "[$(date '+%F %T')] JAX-ENKF-{EXP_ID} 完成"
