@@ -122,7 +122,7 @@ Leaf 模組速查（「這個功能實作在哪」，皆位於 pi_lnn_jax/）
 
 改動前必讀：
   cylinder/run.py 模組 docstring           —— RNG 消費不變量（bit-identical 契約的承重面，
-                                              有論文證據綁著：paper/tmlr-format/sections/
+                                              有論文證據綁著：paper/pof-format/sections/
                                               07b_cylinder_feasibility.tex、appendix/C_cylinder.tex）
   cylinder/assembly.py 模組 docstring      —— 建構期／執行期的硬性邊界、spec §6 三條不修
   cylinder/config.py 模組與 ADR —— case policy 與相容邊界

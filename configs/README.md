@@ -46,6 +46,7 @@ exp_<campaign>_<variant>[_s<training-seed>|_p<placement-seed>][_v<iteration>].to
 | **eval_multi_re_train5{,_crp}** | 2 | 工具 | 上列的評估 config（`scripts/evaluate_multi_re.py`、baselines eval 重用）。 |
 | **exp_snap_st{1,2,4,8}_s{42,1,2}** | 12 | 已定案 | 實驗1：data-snapshot 數量 sweep。訓練 `time_strides`∈{1,2,4,8}→T∈{201,101,51,26}，n=3 seeds。派生自 `exp_245_b3_les_T50.toml`（只改 time_strides/seed/artifacts_dir）。eval 端 `evaluate_exp245.py --time-stride 2` 固定格點（勿設 `EVAL_TIME_STRIDE`），train stride 為唯一變因。 |
 | **exp_drop_b0_s{42,1,2}** | 3 | 已定案 | 實驗2 sensor-dropout robustness 的 B0 vanilla baseline（用 `ARCH=vanilla` 跑）。B3 對照重用 `exp_snap_st2_s{seed}`。dropout 機制：`pi_lnn_jax/sensor_dropout.py` zero-mask；train-time `--sensor_dropout_rate`（denoising，mask 輸入監督真值）、eval-time `evaluate_exp245.py --sensor_dropout_rate/realizations`。 |
+| **exp_alpressure_20261002_k{100,200}_{on,off}_s{42,1,2,3,4}** | 20 | 待結果 | AL 壓力五 seed 配對補實驗；兩個預算各 on/off 五 seed，全新產物。off 臂必須 `TRAIN_FLAGS=--ablate_no_al`，其餘提交參數一致。設計見 `knowledge/experiments/kolmogorov-al-pressure-matched-2026-10-02.md`。 |
 | **mini_smoke** | 1 | 工具 | 最小 smoke config（僅 lab-server Slurm 用；本地不跑 smoke）。 |
 
 ## 新增 config 時

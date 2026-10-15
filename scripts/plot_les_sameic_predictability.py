@@ -4,7 +4,7 @@
 What:
     三格共用時間軸 t∈[0,5] s：
       (a) 速度誤差（%）——full-field rel-L², 低波段 rel-L²(k≤5), rel-L^∞；
-          灰色點線是 √2 的完全去相關水準。
+          灰色點線是等能量場的 √2 去相關參考水準。
       (b) 場的 Pearson 相關——速度 u 與渦量 ω。
       (c) LES/DNS 比值——動能 KE 與 enstrophy Z=<ω²/2>。
     兩條灰色虛線是一個與兩個 eddy-turnover time。
@@ -157,7 +157,7 @@ def main() -> int:
     ax.plot(t, s["rel_linf"], color=OKABE_ITO["vermillion"], ls=":",
             label=r"rel-$L^\infty$")
     ax.axhline(100.0 * np.sqrt(2.0), color="#808080", ls=":", lw=0.8)
-    ax.text(0.03, 0.87, r"$\sqrt{2}$ (decorrelated)", transform=ax.transAxes,
+    ax.text(0.03, 0.87, r"$\sqrt{2}$ (equal-energy)", transform=ax.transAxes,
             color="#666666", fontsize=LEGEND_PT, va="bottom", ha="left")
     ax.set_ylim(-5, 170)
     ax.set_ylabel("Velocity error (%)")

@@ -79,15 +79,53 @@ class ReBatch(NamedTuple):
     v_std: jnp.ndarray         # scalar
     p_mean: jnp.ndarray        # scalar (baseline 無 p → 0.0)
     p_std: jnp.ndarray         # scalar (baseline 無 p → 1.0)
+    # encoder 輸入覆寫（K–Δt 2×2 消融）。None = encoder 直接吃 sensor_vals/sensor_time，
+    # 即既有行為。設了之後 sensor_vals/sensor_time 只代表**監督目標**。見 encoder_context。
+    enc_vals: Any = None       # [T_enc, K, C] | None
+    enc_time: Any = None       # [T_enc] | None
 
 
-def _make_re_batch(dataset: dict, dtype: Any = jnp.float32) -> ReBatch:
-    """Convert one dataset dict (from load_multi_re_sensors) into ReBatch."""
+def encoder_context(re_batch: ReBatch):
+    """encoder 該吃的 `(vals, time)`：有覆寫用覆寫，否則原樣回傳監督目標。
+
+    Why 單一入口：loss、GradNorm probe、mid/final eval 都要餵 encoder，而 decoder 的
+    時間軸必須跟著 encoder 走（h_states 是按 encoder 幀索引的）。任何一處繞過這裡直接
+    讀 `sensor_vals`，消融臂上 probe 與 loss 就會量到不同的東西——那正是 B-10。
+    沒有覆寫時回傳的是**同一個物件**，所以預設路徑的 jit 圖與舊版逐字相同。
+    """
+    if (re_batch.enc_vals is None) != (re_batch.enc_time is None):
+        raise ValueError("ReBatch 的 enc_vals 與 enc_time 必須同時設定或同時為 None")
+    if re_batch.enc_vals is None:
+        return re_batch.sensor_vals, re_batch.sensor_time
+    return re_batch.enc_vals, re_batch.enc_time
+
+
+def _make_re_batch(dataset: dict, dtype: Any = jnp.float32,
+                   encoder_time_stride: int = 1, target_time_stride: int = 1) -> ReBatch:
+    """Convert one dataset dict (from load_multi_re_sensors) into ReBatch.
+
+    兩個 stride 都是 1（預設）時與舊版逐字相同、不產生覆寫欄位。否則從同一份已
+    正規化的序列各自切出 encoder 輸入與監督目標——兩者共用同一組 norm_stats，
+    不會因為切法不同而各自正規化。只允許其中一個 ≠1，讓兩條時間軸互為子集。
+    """
+    e, t = int(encoder_time_stride), int(target_time_stride)
+    if e < 1 or t < 1:
+        raise ValueError(f"encoder_time_stride / target_time_stride 必須 ≥1，收到 {e} / {t}")
+    if e != 1 and t != 1:
+        raise ValueError(
+            f"encoder_time_stride={e} 與 target_time_stride={t} 其中一個必須是 1："
+            "兩條時間軸要互為子集，decoder 對齊查詢時刻的語意才說得清")
     ns = dataset["norm_stats"]
+    vals = jnp.asarray(dataset["sensor_vals"], dtype=dtype)
+    time = jnp.asarray(dataset["sensor_time"], dtype=dtype)
+    enc_vals = enc_time = None
+    if e != 1 or t != 1:
+        enc_vals, enc_time = vals[::e], time[::e]
+        vals, time = vals[::t], time[::t]
     return ReBatch(
-        sensor_vals=jnp.asarray(dataset["sensor_vals"], dtype=dtype),
+        sensor_vals=vals,
         sensor_pos=jnp.asarray(dataset["sensor_pos"], dtype=dtype),
-        sensor_time=jnp.asarray(dataset["sensor_time"], dtype=dtype),
+        sensor_time=time,
         re_norm=jnp.asarray(dataset["re_norm"], dtype=dtype),
         nu=jnp.asarray(1.0 / float(dataset["re_value"]), dtype=dtype),
         u_mean=jnp.asarray(ns["u_mean"], dtype=dtype),
@@ -96,7 +134,37 @@ def _make_re_batch(dataset: dict, dtype: Any = jnp.float32) -> ReBatch:
         v_std=jnp.asarray(ns["v_std"], dtype=dtype),
         p_mean=jnp.asarray(ns.get("p_mean", 0.0), dtype=dtype),
         p_std=jnp.asarray(ns.get("p_std", 1.0), dtype=dtype),
+        enc_vals=enc_vals,
+        enc_time=enc_time,
     )
+
+
+def check_encoder_target_strides(*, encoder_time_stride: int, target_time_stride: int,
+                                 arch: str, n_datasets: int, sensor_cut_min_frac: float,
+                                 autoreg_pseudo_dt: float, sensor_dropout_rate: float,
+                                 use_continuous_re_physics: bool, refine_optimizer: str) -> None:
+    """encoder／監督 stride 拆開時，拒收所有沒驗證過的組合。預設 (1,1) 一律放行。
+
+    這些組合各自都在 encoder 或 decoder 的時間軸上動手腳（截斷、延伸、遮罩、另一條
+    physics 路徑、另一段 refine 迴圈），與拆開的兩條時間軸疊在一起時對齊語意沒有人
+    檢查過。寧可現在拒收，不要讓一個沒想清楚的組合安靜地跑出數字。
+    """
+    if int(encoder_time_stride) == 1 and int(target_time_stride) == 1:
+        return
+    tag = f"encoder_time_stride={encoder_time_stride}／target_time_stride={target_time_stride}"
+    if arch != "liquid":
+        raise ValueError(f"{tag} 只支援 arch=liquid（收到 {arch!r}）：B0/B2 沒有 encode/decode 拆分")
+    if int(n_datasets) != 1:
+        raise ValueError(f"{tag} 只支援單一 dataset（收到 {n_datasets} 個）")
+    for name, val in (("sensor_cut_min_frac", sensor_cut_min_frac),
+                      ("autoreg_pseudo_dt", autoreg_pseudo_dt),
+                      ("sensor_dropout_rate", sensor_dropout_rate)):
+        if float(val) != 0.0:
+            raise ValueError(f"{tag} 不得與 {name}={val} 同時開啟：兩者都改動 encoder 的時間軸")
+    if use_continuous_re_physics:
+        raise ValueError(f"{tag} 不得與 use_continuous_re_physics 同時開啟")
+    if str(refine_optimizer).lower() not in ("none", ""):
+        raise ValueError(f"{tag} 不得與 refine（{refine_optimizer!r}）同時開啟")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +417,109 @@ def _load_dns_for_eval(data: KolmogorovDataConfig) -> tuple[np.ndarray, np.ndarr
 # Loss assembly: closure that returns jit-able loss_fn
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _encoder_inputs(model, params_, re_batch, sensor_input_mask,
+                    autoreg_pseudo_times, autoreg_rounds, has_encode):
+    """encoder 那一側的輸入：encoder_context → dropout → 自迴歸延伸。
+
+    回 (enc_time_src, sensor_vals_in, vals_enc, time_enc)。
+    `loss_fn` 與 `_build_encode_fn` 共用這一份，兩者餵給 encode 的東西因此不可能分岔。
+    """
+    sensor_pos = re_batch.sensor_pos
+    re_norm = re_batch.re_norm
+    # encoder 的輸入；沒有覆寫時就是 re_batch.sensor_vals/sensor_time 兩個物件本身。
+    # loss_fn 的 sensor_target／t_sensor_q 一律取 sensor_vals/sensor_time（監督目標）。
+    enc_vals_src, enc_time_src = encoder_context(re_batch)
+
+    # train-time sensor dropout（denoising 語意）：mask 只作用「模型輸入」，
+    # sensor_target 仍用未 mask 的原始 sensor_vals（監督真值）。
+    # mask 在 jit 外每 step 預生成、shape 固定 [K] → 不 retrace（比照 sensor_idx）。
+    # 註：CRP physics 路徑（re_batch_crp）與 GradNorm probe 不套此 mask（次要路徑）。
+    sensor_vals_in = (
+        apply_sensor_dropout(enc_vals_src, sensor_input_mask)
+        if sensor_input_mask is not None else enc_vals_src
+    )
+
+    # branch 自迴歸：把序列延伸到 physics_t_max，讓外推段的 branch 狀態會隨時間變。
+    # 關閉（預設）時 vals_enc/time_enc 就是原物件，圖與舊版逐字相同。
+    if autoreg_pseudo_times is not None and has_encode:
+        LiquidOperator_class = model.__class__
+        vals_enc, time_enc = extend_sensor_sequence(
+            model, params_, sensor_vals_in, sensor_pos, re_norm, enc_time_src,
+            autoreg_pseudo_times, autoreg_rounds,
+            encode_method=LiquidOperator_class.encode,
+            decode_method=LiquidOperator_class.decode_query,
+        )
+    else:
+        vals_enc, time_enc = sensor_vals_in, enc_time_src
+    return enc_time_src, sensor_vals_in, vals_enc, time_enc
+
+
+def _build_encode_fn(model, use_continuous_re_physics: bool = False,
+                     autoreg_pseudo_times=None, autoreg_rounds: int = 1):
+    """Return encode_fn(params, re_batch, re_batch_crp, sensor_input_mask) -> h_pre，或 None。
+
+    h_pre = (h_states, h_states_crp)，即 `loss_fn(..., h_pre=...)` 會跳過的那兩次 encode。
+    grad accumulation 用它把 encode 提出分塊（TD-34）：分塊只切查詢點，encode 的輸入
+    每塊相同。無 encode/decode_query 拆分的 arch（B0/PINN）回 None。
+    """
+    LiquidOperator_class = model.__class__
+    if not (hasattr(LiquidOperator_class, "encode")
+            and hasattr(LiquidOperator_class, "decode_query")):
+        return None
+
+    def encode_fn(params_, re_batch, re_batch_crp=None, sensor_input_mask=None):
+        *_, vals_enc, time_enc = _encoder_inputs(
+            model, params_, re_batch, sensor_input_mask,
+            autoreg_pseudo_times, autoreg_rounds, True)
+        h_states = model.apply(
+            params_, vals_enc, re_batch.sensor_pos, re_batch.re_norm, time_enc,
+            method=LiquidOperator_class.encode,
+        )
+        h_states_crp = None
+        if use_continuous_re_physics:
+            h_states_crp = model.apply(
+                params_, re_batch_crp.sensor_vals, re_batch_crp.sensor_pos,
+                re_batch_crp.re_norm, re_batch_crp.sensor_time,
+                method=LiquidOperator_class.encode,
+            )
+        return h_states, h_states_crp
+
+    return encode_fn
+
+
+def accumulate_value_and_grad(loss_fn, encode_fn, params_, chunks, task_w, al_lambda,
+                              w_phys_now, re_batch, causal_eps, re_batch_crp,
+                              sensor_input_mask, sensor_cut_idx):
+    """grad_accum_chunks>1 的累積梯度，回 (grads, total, aux)，皆對 M 塊平均。
+
+    chunks = (cx, cy, ct, sensor_idx)，各自 leading 軸為 M。
+    encode_fn 非 None 時 encode 只算一次：`jax.vjp` 取 encoder 的反向，逐塊對 (params, h)
+    求梯度，∂L/∂h 平均後只穿過 encoder 反向一次。vjp 是線性的，所以與「每塊各自
+    encode 再反向」數學等價，只差加總順序。encode_fn 為 None（B0/PINN）走原寫法。
+    """
+    def _loss(p, cx_c, cy_c, ct_c, sidx_c, h_pre=None):
+        return loss_fn(p, cx_c, cy_c, ct_c, task_w, al_lambda, w_phys_now, re_batch,
+                       causal_eps, sidx_c, re_batch_crp, sensor_input_mask, sensor_cut_idx,
+                       h_pre=h_pre)
+
+    if encode_fn is None:
+        return accumulate_grads(jax.value_and_grad(_loss, has_aux=True), params_, chunks)
+
+    # checkpoint：vjp 只存 encoder 的輸入，反向時重算一次前向。不包的話 encoder 的
+    # 殘差要活過整個 scan，XLA 無法在迴圈內重算——K=800（M=16）因此 OOM（job 6028）。
+    h_pre, enc_vjp = jax.vjp(jax.checkpoint(
+        lambda p: encode_fn(p, re_batch, re_batch_crp, sensor_input_mask)), params_)
+
+    def _vg(p, cx_c, cy_c, ct_c, sidx_c):
+        return jax.value_and_grad(
+            lambda p_, h_: _loss(p_, cx_c, cy_c, ct_c, sidx_c, h_pre=h_),
+            argnums=(0, 1), has_aux=True)(p, h_pre)
+
+    (g_p, g_h), total, aux = accumulate_grads(_vg, params_, chunks)
+    grads = jax.tree_util.tree_map(jnp.add, g_p, enc_vjp(g_h)[0])
+    return grads, total, aux
+
+
 def _build_loss_fn(
     model,
     ns_fn,
@@ -394,32 +565,17 @@ def _build_loss_fn(
     def loss_fn(
         params_, cx, cy, ct, task_weights, al_lambda, w_phys_now, re_batch, causal_eps,
         sensor_idx=None, re_batch_crp=None, sensor_input_mask=None, sensor_cut_idx=None,
+        h_pre=None,
     ):
+        # h_pre=(h_states, h_states_crp)：由 _build_encode_fn 在分塊外預算，本函式跳過那兩次
+        # encode（TD-34）。None（預設）時執行的程式碼與加入此參數前逐字相同。
         sensor_vals = re_batch.sensor_vals
         sensor_pos = re_batch.sensor_pos
         sensor_time = re_batch.sensor_time
         re_norm = re_batch.re_norm
-
-        # train-time sensor dropout（denoising 語意）：mask 只作用「模型輸入」，
-        # sensor_target（下方）仍用未 mask 的原始 sensor_vals（監督真值）。
-        # mask 在 jit 外每 step 預生成、shape 固定 [K] → 不 retrace（比照 sensor_idx）。
-        # 註：CRP physics 路徑（re_batch_crp）與 GradNorm probe 不套此 mask（次要路徑）。
-        sensor_vals_in = (
-            apply_sensor_dropout(sensor_vals, sensor_input_mask)
-            if sensor_input_mask is not None else sensor_vals
-        )
-
-        # branch 自迴歸：把序列延伸到 physics_t_max，讓外推段的 branch 狀態會隨時間變。
-        # 關閉（預設）時 vals_enc/time_enc 就是原物件，圖與舊版逐字相同。
-        if autoreg_pseudo_times is not None and has_encode:
-            vals_enc, time_enc = extend_sensor_sequence(
-                model, params_, sensor_vals_in, sensor_pos, re_norm, sensor_time,
-                autoreg_pseudo_times, autoreg_rounds,
-                encode_method=LiquidOperator_class.encode,
-                decode_method=LiquidOperator_class.decode_query,
-            )
-        else:
-            vals_enc, time_enc = sensor_vals_in, sensor_time
+        enc_time_src, sensor_vals_in, vals_enc, time_enc = _encoder_inputs(
+            model, params_, re_batch, sensor_input_mask,
+            autoreg_pseudo_times, autoreg_rounds, has_encode)
 
         # decode 端可見的時間軸。兩個 opt-in 都作用在這裡：
         #   sensor_cut_idx —— 截點之後的幀推到哨兵值 → branch 卡在截點、dt>0 有真值可學；
@@ -448,7 +604,7 @@ def _build_loss_fn(
 
         # Wave 4 perf: encode once + decode-only for sensor pred + PDE
         if has_encode:
-            h_states = model.apply(
+            h_states = h_pre[0] if h_pre is not None else model.apply(
                 params_, vals_enc, sensor_pos, re_norm, time_enc,
                 method=LiquidOperator_class.encode,
             )
@@ -459,7 +615,7 @@ def _build_loss_fn(
         else:
             # B0/B2 baselines: 直接走 __call__ (內部沒 encode 拆分)
             pred = model.apply(
-                params_, sensor_vals_in, sensor_pos, re_norm, sensor_time,
+                params_, sensor_vals_in, sensor_pos, re_norm, enc_time_src,
                 xy_sensor_q, t_sensor_q,
             )
             h_states = None  # for arch without encode
@@ -523,7 +679,7 @@ def _build_loss_fn(
             needs_cont_points = use_causal or (use_al and al_constraint_mode == "signed_mean")
             if needs_cont_points:
                 mom_u, mom_v, cont, mom_u_pp, mom_v_pp, cont_pp = ns_fn_baseline(
-                    params_, sensor_vals_in, sensor_pos, re_norm, sensor_time,
+                    params_, sensor_vals_in, sensor_pos, re_norm, enc_time_src,
                     cx, cy, ct, A_force, k_f_force,
                     re_batch.nu, re_batch.u_mean, re_batch.u_std,
                     re_batch.v_mean, re_batch.v_std, re_batch.p_mean, re_batch.p_std,
@@ -540,7 +696,7 @@ def _build_loss_fn(
                     mom_u_eff, mom_v_eff, cont_eff = mom_u, mom_v, cont
             else:
                 mom_u, mom_v, cont = ns_fn_baseline(
-                    params_, sensor_vals_in, sensor_pos, re_norm, sensor_time,
+                    params_, sensor_vals_in, sensor_pos, re_norm, enc_time_src,
                     cx, cy, ct, A_force, k_f_force,
                     re_batch.nu, re_batch.u_mean, re_batch.u_std,
                     re_batch.v_mean, re_batch.v_std, re_batch.p_mean, re_batch.p_std,
@@ -551,7 +707,7 @@ def _build_loss_fn(
         # 連續-Re 物理正則（spec 2026-06-13）：在 sampled re_norm' 重編碼 + NS 殘差，
         # 加權併入物理 task（data loss / AL / causal 不受影響，仍只用 data-Re）。
         if use_continuous_re_physics:
-            h_states_crp = model.apply(
+            h_states_crp = h_pre[1] if h_pre is not None else model.apply(
                 params_, re_batch_crp.sensor_vals, re_batch_crp.sensor_pos,
                 re_batch_crp.re_norm, re_batch_crp.sensor_time,
                 method=LiquidOperator_class.encode,
@@ -707,13 +863,16 @@ def _build_grad_norm_fn(
             xy_sensor_q = xy_sensor_q[sub]
             t_sensor_q = t_sensor_q[sub]
             sensor_target = sensor_target[sub]
+        # encoder 的輸入與 decoder 的時間軸必須與主 loss 同源（encoder_context）；
+        # 上方的查詢點與目標仍取監督目標 sensor_vals/sensor_time。
+        enc_vals_src, enc_time_src = encoder_context(re_batch)
         if has_encode:
-            h_states = model.apply(p, sensor_vals, sensor_pos, re_norm, sensor_time,
+            h_states = model.apply(p, enc_vals_src, sensor_pos, re_norm, enc_time_src,
                                     method=LiquidOperator_class.encode)
-            pred = model.apply(p, xy_sensor_q, t_sensor_q, h_states, sensor_time, sensor_pos,
+            pred = model.apply(p, xy_sensor_q, t_sensor_q, h_states, enc_time_src, sensor_pos,
                                method=LiquidOperator_class.decode_query)
         else:
-            pred = model.apply(p, sensor_vals, sensor_pos, re_norm, sensor_time,
+            pred = model.apply(p, enc_vals_src, sensor_pos, re_norm, enc_time_src,
                                xy_sensor_q, t_sensor_q)
         if sensor_channel_weights and len(sensor_channel_weights) < C:
             raise ValueError(
@@ -734,15 +893,17 @@ def _build_grad_norm_fn(
     def physics_components(p, cx, cy, ct, re_batch, causal_eps):
         A_f, k_f_f = model.apply(p, method=LiquidOperator_class.get_forcing)
         if has_encode:
-            h_states = model.apply(p, re_batch.sensor_vals, re_batch.sensor_pos,
-                                    re_batch.re_norm, re_batch.sensor_time,
+            # encoder 輸入與 decoder 時間軸與主 loss 同源，見 encoder_context
+            enc_vals_src, enc_time_src = encoder_context(re_batch)
+            h_states = model.apply(p, enc_vals_src, re_batch.sensor_pos,
+                                    re_batch.re_norm, enc_time_src,
                                     method=LiquidOperator_class.encode)
             if use_causal:
                 # 與主 loss 同步：加權後的等效殘差取代原始 mean。缺了它，G_phys 量的是
                 # 未加權殘差，而被最佳化的是 causal 加權版——分母錯了，權重就錯。
                 _, _, _, mom_u_pp, mom_v_pp, cont_pp = ns_fn(
                     p, h_states, cx, cy, ct, A_f, k_f_f,
-                    re_batch.sensor_pos, re_batch.sensor_time,
+                    re_batch.sensor_pos, enc_time_src,
                     re_batch.nu, re_batch.u_mean, re_batch.u_std,
                     re_batch.v_mean, re_batch.v_std, re_batch.p_mean, re_batch.p_std,
                     drag_alpha=_drag_alpha, return_per_point=True)
@@ -751,7 +912,7 @@ def _build_grad_norm_fn(
                 return (jnp.mean(w_c * mom_u_pp ** 2), jnp.mean(w_c * mom_v_pp ** 2),
                         jnp.mean(w_c * cont_pp ** 2))
             return ns_fn(p, h_states, cx, cy, ct, A_f, k_f_f,
-                         re_batch.sensor_pos, re_batch.sensor_time,
+                         re_batch.sensor_pos, enc_time_src,
                          re_batch.nu, re_batch.u_mean, re_batch.u_std,
                          re_batch.v_mean, re_batch.v_std, re_batch.p_mean, re_batch.p_std,
                          drag_alpha=_drag_alpha)
@@ -931,10 +1092,31 @@ def build_context(config: KolmogorovEffectiveConfig) -> TrainingContext:
         print(f"  dataset[{i}] Re={d['re_value']:.0f}  sensor_vals={d['sensor_vals'].shape}  "
               f"u_std={d['norm_stats']['u_std']:.4f}")
 
+    # encoder／監督 stride 拆開（K–Δt 2×2 消融）。預設 1/1 時守門不發聲、ReBatch 與舊版相同。
+    check_encoder_target_strides(
+        encoder_time_stride=curriculum.encoder_time_stride,
+        target_time_stride=curriculum.target_time_stride,
+        arch=run.arch, n_datasets=n_datasets,
+        sensor_cut_min_frac=curriculum.sensor_cut_min_frac,
+        autoreg_pseudo_dt=curriculum.autoreg_pseudo_dt,
+        sensor_dropout_rate=curriculum.sensor_dropout_rate,
+        use_continuous_re_physics=config.loss.use_continuous_re_physics,
+        refine_optimizer=config.refinement.optimizer)
+
     # Wave 5: 建立 per-Re ReBatch list（Python list of ReBatch，給 host 迴圈用）
-    re_batches = [_make_re_batch(d) for d in datasets]
-    d0 = datasets[0]
-    T, K = d0["sensor_vals"].shape[0], d0["sensor_vals"].shape[1]
+    re_batches = [
+        _make_re_batch(d, encoder_time_stride=curriculum.encoder_time_stride,
+                       target_time_stride=curriculum.target_time_stride)
+        for d in datasets
+    ]
+    # 母體取監督目標（ReBatch.sensor_vals），不是載入的整條序列——兩者只在
+    # target_time_stride≠1 時不同；run.py 的 sensor_idx 也從 ReBatch 取，必須同源。
+    T, K = re_batches[0].sensor_vals.shape[0], re_batches[0].sensor_vals.shape[1]
+    if curriculum.encoder_time_stride != 1 or curriculum.target_time_stride != 1:
+        _enc_v, _ = encoder_context(re_batches[0])
+        print(f"  encoder／監督拆開：encoder {int(_enc_v.shape[0])} 幀"
+              f"（stride {curriculum.encoder_time_stride}）、監督目標 {T} 幀"
+              f"（stride {curriculum.target_time_stride}）")
     _nsq_req = curriculum.n_sensor_query_requested
     _nsq_eff = effective_sensor_query_points(_nsq_req, T * K)
     if _nsq_eff != _nsq_req:
@@ -1007,6 +1189,13 @@ def build_context(config: KolmogorovEffectiveConfig) -> TrainingContext:
         use_causal=loss.use_causal,
         use_continuous_re_physics=loss.use_continuous_re_physics,
         continuous_re_physics_weight=loss.continuous_re_physics_weight,
+        autoreg_pseudo_times=autoreg_pseudo_times,
+        autoreg_rounds=int(config.curriculum.autoreg_rounds),
+    )
+    # 只有 grad_accum_chunks>1 的分支用它（TD-34）；參數須與上方 loss_fn 的 encoder 側一致。
+    encode_fn = _build_encode_fn(
+        model,
+        use_continuous_re_physics=loss.use_continuous_re_physics,
         autoreg_pseudo_times=autoreg_pseudo_times,
         autoreg_rounds=int(config.curriculum.autoreg_rounds),
     )
@@ -1087,13 +1276,9 @@ def build_context(config: KolmogorovEffectiveConfig) -> TrainingContext:
             M = grad_accum
             chunks = (cx.reshape(M, -1), cy.reshape(M, -1), ct.reshape(M, -1),
                       sensor_idx.reshape(M, -1))
-
-            def _vg(p, cx_c, cy_c, ct_c, sidx_c):
-                return jax.value_and_grad(loss_fn, has_aux=True)(
-                    p, cx_c, cy_c, ct_c, task_w, al_lambda, w_phys_now, re_batch, causal_eps,
-                    sidx_c, re_batch_crp, sensor_input_mask, sensor_cut_idx,
-                )
-            grads, total, (sl, mu, mv, c, pr, al_c) = accumulate_grads(_vg, params_, chunks)
+            grads, total, (sl, mu, mv, c, pr, al_c) = accumulate_value_and_grad(
+                loss_fn, encode_fn, params_, chunks, task_w, al_lambda, w_phys_now,
+                re_batch, causal_eps, re_batch_crp, sensor_input_mask, sensor_cut_idx)
         else:
             (total, (sl, mu, mv, c, pr, al_c)), grads = jax.value_and_grad(loss_fn, has_aux=True)(
                 params_, cx, cy, ct, task_w, al_lambda, w_phys_now, re_batch, causal_eps,

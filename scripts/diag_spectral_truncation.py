@@ -15,7 +15,12 @@ Definition:
     再與未濾波場比較：
 
         KE loss   = |KE(filtered) - KE(full)| / KE(full)
+        uv err    = ||(u,v)(filtered) - (u,v)(full)||_2 / ||(u,v)(full)||_2
         omega err = ||omega(filtered) - omega(full)||_2 / ||omega(full)||_2
+
+    uv err 與主指標 ē_uv 同定義（速度向量相對 L2），把主指標映射到有效截斷用它；
+    它與 omega err 都是正交投影的殘差，因此是任何帶限重建的下界（由該投影本身取到）。
+    KE loss 不是下界：積分量可在保留帶內重新分配能量而被湊中。
 
     omega 用中央差分（與 metric_artifact.compute_vorticity 同算子），不是譜式 k^2 E(k)：
     要被反演的量測值本身就是有限差分算出來的，兩側算子必須一致才可比。
@@ -44,7 +49,8 @@ def lowpass(field: np.ndarray, kcut: float) -> np.ndarray:
     N = field.shape[-1]
     k = np.fft.fftfreq(N, d=1.0 / N)
     KX, KY = np.meshgrid(k, k, indexing="ij")
-    mask = (np.sqrt(KX**2 + KY**2) <= kcut)
+    # 容差讓以有限位數給的格點半徑（如 6.4031242 ≈ sqrt(41)）確實包含該殼；相鄰格點半徑相距遠大於 1e-6，整數 kcut 不受影響
+    mask = (np.sqrt(KX**2 + KY**2) <= kcut + 1e-6)
     return np.real(np.fft.ifft2(np.fft.fft2(field, axes=(-2, -1)) * mask, axes=(-2, -1)))
 
 
@@ -76,6 +82,7 @@ def main() -> None:
     u, v, t_sel = u[sel], v[sel], t[sel]
 
     ke_full = 0.5 * (u**2 + v**2).mean(axis=(1, 2))          # 逐幀
+    uv_norm = np.sqrt((u**2 + v**2).sum(axis=(1, 2)))
     w_full = vorticity(u, v)
     w_norm = np.linalg.norm(w_full.reshape(w_full.shape[0], -1), axis=1)
 
@@ -85,6 +92,7 @@ def main() -> None:
         uf, vf = lowpass(u, kc), lowpass(v, kc)
         ke_f = 0.5 * (uf**2 + vf**2).mean(axis=(1, 2))
         ke_loss = np.abs(ke_f - ke_full) / ke_full                       # 逐幀比值
+        uv_err = np.sqrt(((uf - u)**2 + (vf - v)**2).sum(axis=(1, 2))) / uv_norm
         wf = vorticity(uf, vf)
         dw = (wf - w_full).reshape(wf.shape[0], -1)
         w_err = np.linalg.norm(dw, axis=1) / w_norm
@@ -92,6 +100,8 @@ def main() -> None:
             "k_cut": kc,
             "ke_loss_pct": float(100 * ke_loss.mean()),
             "ke_loss_sd_pct": float(100 * ke_loss.std(ddof=1)),
+            "uv_rel_l2_pct": float(100 * uv_err.mean()),
+            "uv_rel_l2_sd_pct": float(100 * uv_err.std(ddof=1)),
             "omega_rel_l2_pct": float(100 * w_err.mean()),
             "omega_rel_l2_sd_pct": float(100 * w_err.std(ddof=1)),
         })
@@ -114,9 +124,10 @@ def main() -> None:
     op.write_text(json.dumps(out, indent=2, ensure_ascii=False))
 
     print(f"[trunc] window={a.window}  frames={t_sel.size}  t in [{t_sel[0]:.2f}, {t_sel[-1]:.2f}]  grid={u.shape[-1]}²")
-    print(f"  {'k_cut':>6}  {'KE loss %':>12}  {'omega rel-L2 %':>16}")
+    print(f"  {'k_cut':>7}  {'KE loss %':>10}  {'uv rel-L2 %':>12}  {'omega rel-L2 %':>15}")
     for r in rows:
-        print(f"  {r['k_cut']:6.0f}  {r['ke_loss_pct']:12.2f}  {r['omega_rel_l2_pct']:16.2f}")
+        print(f"  {r['k_cut']:7.3f}  {r['ke_loss_pct']:10.2f}  {r['uv_rel_l2_pct']:12.2f}"
+              f"  {r['omega_rel_l2_pct']:15.2f}")
     print(f"[out] {op}")
 
 

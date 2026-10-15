@@ -28,7 +28,7 @@ Two things the recomputation settled, both of which had drifted in the text:
     (1.119 against 1.12) at a spread of 0.07 against a published 0.08.
 
 The K=100 seed set is NOT identified: main5_s{1..4,42} gives uv_rel_err
-15.032 +/- 0.082 against a published 15.04 +/- 0.06, so the K=100 figures below come
+15.032 +/- 0.082 against a published 15.04 +/- 0.05, so the K=100 figures below come
 from a neighbouring set and are not evidence about the published K=100 value.
 
 Runs are read from `--artifacts-root`; seeds whose `final_eval/metrics.json` is

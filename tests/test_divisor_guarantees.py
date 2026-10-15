@@ -62,6 +62,7 @@ _SCHEMA_KEYS = {
     "gradnorm_freq": "gradnorm_freq",
     "al_update_freq": "al_update_freq",
     "save_every": "checkpoint_period",
+    "wandb_weights_every": "wandb_weights_every",
 }
 
 

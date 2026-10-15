@@ -1,6 +1,6 @@
 # Cylinder reconstruction error vs Re —— 黏滯修正（88d2447 C1: nu = u_inf*D/Re）後重跑
 # 舊批見 cylinder_re_sweep.csv（跑在 4dd366d，nu 仍為 1/Re，高估黏性 100-570 倍）
-# jobs: 1781 from 5776；2343-9843 from 5806-5819。單 seed=42，STEPS=16000，N_COLLO=512
+# jobs: 1781 from 5776；2343-9843 from 5806-5819。單 seed=42，STEPS=16000，N_COLLO=1024，DATA_CHUNKS=4
 # 入口 scripts/legacy/train_cylinder_v1.py；15 支跨 HEAD 41c5ebe/66dbf50/afc89c4，
 #   三者之間不含 cylinder 程式碼變更（git diff --name-only 查證，只動 knowledge 與 thesis）
 # Re=10031 為既有湍流參考點（非 every-5th sweep），job 5830 於 2026-09-17 同協定重跑；ref 欄=1

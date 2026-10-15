@@ -2,11 +2,18 @@
 """cross-Re × sensor-budget 圖：重建誤差 vs 感測器數 K，逐 Re 一條線。
 
 What:
-    讀 campaign 的 15 個 final_eval/metrics.json（Re ∈ {100,500,1000,10⁴,10⁶}
-    × K ∈ {10,50,100}），畫兩個 panel：KE 相對誤差與渦度相對誤差 vs K。
-    對應 thesis 的 cross-Re sensor-budget 圖與 pi-lnn 的 EXP-320~335。
+    讀 campaign 15 格（Re ∈ {100,500,1000,10⁴,10⁶} × K ∈ {10,50,100}）以現行
+    指標套件重評的 metric_artifact.json（lab-server jobs 5554、5567-5570、
+    5576-5585），畫兩個 panel vs K：(a) 速度向量 (u,v) 相對 L2 誤差、
+    (b) 渦度相對 L2 誤差，兩者都是評估窗內的時間平均。
+    對應 thesis 附錄的 fig:crossre_sensor_budget 與 pi-lnn 的 EXP-320~335。
 
 Why:
+    (a) 用速度向量誤差而非 KE：它是 thesis 登錄的 primary metric，而
+    tab:crossre_kstar 三欄與 tab:crossre_baselines 都讀自同一批重評產物——圖讀
+    同一批，表中的門檻才能從圖上交叉讀出。舊的 final_eval/metrics.json 只有
+    u、v 分量、沒有向量誤差，因此不再讀它。
+
     這張圖的全部意義在於「同一條線上只有 K 在變、線與線之間只有 Re 在變」。
     因此缺一個 (Re, K) 就預設硬失敗：靜默少畫一個點會讓曲線的斜率變成另一件
     事，而圖上看不出來。要畫未跑完的中間結果必須 `--allow-partial` 明確表態，
@@ -30,8 +37,6 @@ from journal_style import (  # noqa: E402
 
 import matplotlib.pyplot as plt  # noqa: E402
 from pi_lnn_jax.metric_artifact import (  # noqa: E402
-    KE_T_MAPE_SPATIALMEAN_V1,
-    LegacyInterpretation,
     VORTICITY_REL_ERR_TIME_MEAN_V1,
     read_metric_summary,
 )
@@ -41,21 +46,22 @@ RE_LABELS = [("100", 100.0), ("500", 500.0), ("1000", 1000.0),
              ("10000", 10000.0), ("1e6", 1e6)]
 K_VALUES = [10, 50, 100]
 
-# KE 用 ke_t_mape（E(t) 軌跡的 MAPE），不是 metrics_mean 的 ke_rel_err。
-# 兩者同樣叫「KE 誤差」但不是同一個量：ke_rel_err 是逐時場的 KE 相對誤差，
-# 在 Re=10⁴/K=100 為 18.96%，而 thesis 該格報 4.56%——對得上的是 ke_t_mape
-# 的 4.48%。用錯的那個會讓整張圖高估三到四倍。
-METRICS = [(KE_T_MAPE_SPATIALMEAN_V1, "KE MAPE (%)"),
+# 重評產物落在各格的 eval_uv/（evaluate_exp245 的 OUTPUT_SUBDIR）。唯一例外是
+# 這批的第一支 job 5554（Re=10³, K=100），落在 eval_uv_matched/；它宣告
+# fixed_grid stride=1，而 Re=10³ 訓練的 time_strides[0] 本來就是 1，時間軸與
+# 同 Re 另兩格的 follow_training 相同（T=104, t∈[0, 10.3]）。路徑照 lab-server
+# 原樣鏡像，不在本機改名，rsync 回來的結構才對得上。
+EVAL_SUBDIR = "eval_uv"
+EVAL_SUBDIR_OVERRIDES = {("1000", 100): "eval_uv_matched"}
+
+# canonical artifact 對同一個 metric definition（velocity.vector.rel_l2.v1）
+# 同時存 time_mean 與 time_p90 兩個 summary，只給 definition id 會因歧義而
+# raise；因此與 VORTICITY_REL_ERR_TIME_MEAN_V1 一樣點名 time_mean summary。
+VELOCITY_REL_ERR_TIME_MEAN_V1 = "velocity.vector.rel_l2.time_mean.v1"
+METRICS = [(VELOCITY_REL_ERR_TIME_MEAN_V1,
+            r"Velocity $(u,v)$ relative error (%)"),
            (VORTICITY_REL_ERR_TIME_MEAN_V1,
             r"Vorticity $\omega$ relative error (%)")]
-
-# 這張 thesis 圖定義上比較 spatial-mean KE time-series MAPE。舊 campaign
-# artifacts 產於 pointwise_v2 marker 導入前，故其 unmarked ke_t_mape 明示解讀
-# 為同一 spatial-mean definition；package reader 不從日期、路徑或檔名自行推測。
-LEGACY_KE_INTERPRETATION = LegacyInterpretation(
-    definition_id=KE_T_MAPE_SPATIALMEAN_V1,
-    basis="cross-Re thesis campaign predates the pointwise_v2 definition",
-)
 
 
 def _re_display(re_value: float) -> str:
@@ -66,34 +72,20 @@ def _re_display(re_value: float) -> str:
     return exponents.get(float(re_value), rf"$Re={int(re_value)}$")
 
 
-def collect(
-    root: Path,
-    *,
-    legacy_interpretation: LegacyInterpretation | None = None,
-) -> tuple[dict, list[str]]:
-    """讀取 campaign 產出 → {(re_label, K): metrics_mean}，並回報缺哪些。"""
+def collect(root: Path) -> tuple[dict, list[str]]:
+    """讀取 campaign 重評產出 → {(re_label, K): {summary id: value}}，並回報缺哪些。"""
     found, missing = {}, []
     for label, _ in RE_LABELS:
         for k in K_VALUES:
-            result_dir = root / f"crossre_re{label}_k{k}" / "final_eval"
-            canonical_path = result_dir / "metric_artifact.json"
-            compatibility_path = result_dir / "metrics.json"
-            path = canonical_path if canonical_path.is_file() else compatibility_path
+            subdir = EVAL_SUBDIR_OVERRIDES.get((label, k), EVAL_SUBDIR)
+            path = root / f"crossre_re{label}_k{k}" / subdir / "metric_artifact.json"
             if not path.is_file():
-                missing.append(
-                    f"Re={label} K={k}: {canonical_path} or {compatibility_path}"
-                )
+                missing.append(f"Re={label} K={k}: {path}")
                 continue
             with open(path) as f:
                 blob = json.load(f)
             summaries = [
-                read_metric_summary(
-                    blob,
-                    definition_id,
-                    legacy_interpretation=(legacy_interpretation
-                                           if definition_id == KE_T_MAPE_SPATIALMEAN_V1
-                                           else None),
-                )
+                read_metric_summary(blob, definition_id)
                 for definition_id, _ in METRICS
             ]
             found[(label, k)] = {
@@ -117,10 +109,7 @@ def main() -> int:
     repo = Path(__file__).resolve().parent.parent
     root = Path(args.artifacts_root) if args.artifacts_root \
         else repo / "artifacts" / "kolmogorov"
-    found, missing = collect(
-        root,
-        legacy_interpretation=LEGACY_KE_INTERPRETATION,
-    )
+    found, missing = collect(root)
 
     n_total = len(RE_LABELS) * len(K_VALUES)
     if missing and not args.allow_partial:
@@ -148,6 +137,9 @@ def main() -> int:
                     label=_re_display(re_value))
         ax.set_xscale("log")
         ax.set_yscale("log")
+        # 下限固定 1%：速度誤差的最小值 1.38% 讓自動範圍只含一個 decade，log 軸
+        # 只剩 10¹ 一個刻度標籤就讀不出尺度。兩格同一下限，底部 decade 也對齊。
+        ax.set_ylim(bottom=1.0)
         ax.set_xticks(K_VALUES)
         ax.set_xticklabels([str(k) for k in K_VALUES])
         ax.minorticks_off()

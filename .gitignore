@@ -13,8 +13,6 @@ artifacts/
 # Slurm runtime outputs: the sbatch template and submit script are tracked,
 # the sed-substituted sbatch files and their logs are not.
 logs/
-# Benchmark JSON outputs
-bench/results/
 
 # --- Large field binaries (> 100 MB) ---
 # DNS / LES full fields and cylinder sensor shards. Located at runtime via

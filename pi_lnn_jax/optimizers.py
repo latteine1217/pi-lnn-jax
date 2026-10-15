@@ -18,7 +18,7 @@ Why:
     2. **schedule_free 與 LR schedule 不重疊** —— schedule_free 內部自帶 warmup，
        不在外面再套 warmup_exponential_decay_schedule，避免 double-warmup。
        純 adam / soap 才用 optax LR schedule。
-    3. **conditional import** —— soap-jax / optax_schedule_free 都 lazy import；
+    3. **conditional import** —— soap-jax lazy import、schedule_free 先查 optax.contrib；
        未安裝環境下 module import 本身仍成功，is_*_available() 回 False。
 """
 
@@ -36,7 +36,7 @@ import optax
 # ---------------------------------------------------------------------------
 # Conditional imports
 # ---------------------------------------------------------------------------
-# What: SOAP_JAX 與 optax_schedule_free 都試圖 import；失敗時把 flag 設成 False。
+# What: SOAP_JAX 試圖 import、schedule_free 查 optax.contrib；不可用時把 flag 設成 False。
 # Why: M3 macOS 沒裝 soap-jax（依賴 jax-cuda12 wheel）也不能讓本 module crash。
 
 try:
@@ -47,24 +47,13 @@ except ImportError:
     SOAP_AVAILABLE = False
 
 
-# ScheduleFree 來源優先序：
-#   1. optax.contrib.schedule_free（optax 0.2.4+ 已 upstream，推薦）
-#   2. optax_schedule_free.schedule_free（舊版套件）
-# 兩者 API 都吃 (base_optimizer, learning_rate, ...) 並回 GradientTransformation。
+# ScheduleFree 來源：optax.contrib.schedule_free（optax 0.2.4+ upstream；pyproject 下限同）。
 _schedule_free_fn: Optional[Callable[..., optax.GradientTransformation]] = None
 _schedule_free_source: Optional[str] = None
 
 if hasattr(optax, "contrib") and hasattr(optax.contrib, "schedule_free"):
     _schedule_free_fn = optax.contrib.schedule_free
     _schedule_free_source = "optax.contrib.schedule_free"
-else:
-    try:
-        from optax_schedule_free import schedule_free as _ext_schedule_free  # type: ignore[import-not-found]
-        _schedule_free_fn = _ext_schedule_free
-        _schedule_free_source = "optax_schedule_free"
-    except ImportError:
-        _schedule_free_fn = None
-        _schedule_free_source = None
 
 SCHEDULE_FREE_AVAILABLE = _schedule_free_fn is not None
 
@@ -83,7 +72,7 @@ def is_soap_available() -> bool:
 
 
 def is_schedule_free_available() -> bool:
-    """回傳 schedule_free（optax.contrib 或 optax_schedule_free）是否可用。"""
+    """回傳 optax.contrib.schedule_free 是否可用。"""
     return SCHEDULE_FREE_AVAILABLE
 
 
@@ -270,8 +259,8 @@ def build_optimizer(
         if not SCHEDULE_FREE_AVAILABLE:
             warning_msg = (
                 "[optimizers.build_optimizer] WARNING: requested 'schedule_free' but "
-                "neither optax.contrib.schedule_free nor optax_schedule_free is available. "
-                "Upgrade optax to >= 0.2.4 or install optax-schedule-free. "
+                "optax.contrib.schedule_free is not available. "
+                "Upgrade optax to >= 0.2.4. "
                 "Falling back to plain '{base_optimizer}'."
             ).format(base_optimizer=base_optimizer)
             print(f"\n{'!' * 80}\n{warning_msg}\n{'!' * 80}\n", file=sys.stderr, flush=True)

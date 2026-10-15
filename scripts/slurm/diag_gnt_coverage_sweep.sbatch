@@ -37,6 +37,7 @@ export PYTHONUNBUFFERED=1 PYTHONPATH=".:scripts"
 export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export UV_OFFLINE=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 [ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] 無 data/" >&2; exit 4; }
 [ -x .venv/bin/python ] || { echo "[ERR] 無 .venv" >&2; exit 3; }
 

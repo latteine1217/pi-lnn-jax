@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=jax_accumscan_{EXP_ID}
+#SBATCH --output=logs/jax_accumscan_{EXP_ID}_%j.out
+#SBATCH --error=logs/jax_accumscan_{EXP_ID}_%j.err
+#SBATCH --time=12:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# grad accumulation 的三種寫法（scan／scan unroll／Python 迴圈）比時間與逐位相同
+# （scripts/diag_grad_accum_scan.py，TD-34 開銷 2）。含同碼兩跑的確定性對照。
+#
+# 環境變數：
+#   KOLMO_CONFIGS   空白分隔的 Kolmogorov config（預設 {CONFIG_PATH}）
+#   OUT_DIR         JSON 輸出目錄（預設 logs/diag_grad_accum_scan）
+#   SCAN_FLAGS      原樣附加到腳本的旗標（例：--memory-only 只編譯、印記憶體需求）
+#
+# Kolmogorov 的 optimizer 旗標與 train_exp.sbatch.tmpl 逐字相同（它們不在 config 內）。
+#
+# 用法：
+#   KOLMO_CONFIGS="configs/exp_ksweep_k200_s42.toml configs/exp_245k400_les_T50.toml" \
+#   TMPL=scripts/slurm/diag_grad_accum_scan.sbatch.tmpl \
+#     scripts/slurm/submit_exp.sh accumscan configs/exp_ksweep_k200_s42.toml
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+export UV_NO_SYNC=1
+[ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；head node 先 'uv sync --python 3.12'" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+KOLMO="${KOLMO_CONFIGS:-{CONFIG_PATH}}"
+OUT_DIR="${OUT_DIR:-logs/diag_grad_accum_scan}"
+echo "======================================================================"
+echo "[JAX-ACCUMSCAN-{EXP_ID}] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}  HEAD=$(git rev-parse --short HEAD)"
+echo "  kolmogorov: ${KOLMO}"
+echo "======================================================================"
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+
+FAILED=""
+for cfg in ${KOLMO}; do
+  echo ""; echo "──────── kolmogorov ${cfg} ────────"
+  uv run python -u scripts/diag_grad_accum_scan.py --config "${cfg}" \
+    --optimizer schedule_free --base_optimizer soap --soap_precondition_frequency 2 \
+    --out "${OUT_DIR}/$(basename "${cfg}" .toml)_${SLURM_JOB_ID:-local}.json" \
+    ${SCAN_FLAGS:-} \
+    || { echo "[WARN] ${cfg} 失敗 (rc=$?)"; FAILED="${FAILED} ${cfg}"; }
+done
+
+echo ""; echo "[$(date '+%F %T')] ACCUMSCAN-{EXP_ID} 完成；失敗：${FAILED:-（無）}"

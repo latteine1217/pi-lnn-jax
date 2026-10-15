@@ -48,7 +48,7 @@ Implementation: [`pi_lnn_jax/models.py`](pi_lnn_jax/models.py) (architecture),
 | [`scripts/`](scripts/) | Evaluation, diagnostics, plotting, Slurm submission — see [`scripts/README.md`](scripts/README.md) |
 | [`tests/`](tests/) | 126 test files |
 | [`docs/adr/`](docs/adr/) | Architecture decision records |
-| [`CONTEXT.md`](CONTEXT.md) | Domain vocabulary for evaluation artifacts and configuration |
+| [`GLOSSARY.md`](GLOSSARY.md) | Domain vocabulary for evaluation artifacts and configuration |
 
 Entry points are [`train_kolmogorov.py`](train_kolmogorov.py) and
 [`train_cylinder.py`](train_cylinder.py); both are thin CLI wrappers over

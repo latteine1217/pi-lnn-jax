@@ -30,10 +30,12 @@ CLI argv + TOML
        ├─ make_ns_residual_fn                      pi_lnn_jax/physics.py → ns_fn / poisson_fn
        │  make_ns_residual_fn_baseline             pi_lnn_jax/physics.py → ns_fn_baseline（B0/PINN 路徑）
        ├─ _build_loss_fn                           kolmogorov/assembly.py（data + NS + Poisson + AL + causal + CRP）
+       ├─ _build_encode_fn                        kolmogorov/assembly.py（encode 側；只供 grad accumulation）
        ├─ build_optimizer                          pi_lnn_jax/optimizers.py → tx / opt_info
        ├─ _build_grad_norm_fn                      kolmogorov/assembly.py（weighting 關閉時為 None）
        ├─ step_fn = jit(value_and_grad(loss_fn) → tx.update)          kolmogorov/assembly.py
-       │    └─ grad_accum_chunks>1 → accumulate_grads                 pi_lnn_jax/optimizers.py
+       │    └─ grad_accum_chunks>1 → accumulate_value_and_grad        kolmogorov/assembly.py
+       │         （encode 算一次，逐塊只 decode；內部用 optimizers.accumulate_grads）
        └─ CheckpointManager(ckpt_dir)              pi_lnn_jax/ckpt.py
        → TrainingContext（只有依賴；不持有 params / opt_state）
 

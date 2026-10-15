@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 OUTPUT_PATH = Path(
-    "/Users/latteine/Documents/coding/pi-lnn-jax/paper/tmlr-format/figures/architecture_imagegen.png"
+    "/Users/latteine/Documents/coding/pi-lnn-jax/paper/pof-format/figures/architecture_imagegen.png"
 )
 
 PROMPT = """Create a paper-quality landscape PNG architecture diagram for the PI-CON neural operator.

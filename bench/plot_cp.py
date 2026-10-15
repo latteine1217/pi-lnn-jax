@@ -101,7 +101,7 @@ def figure_mechanism(npz_path, metrics_json, out, alpha, A, k_f):
     print(f"[fig] {out}")
 
 
-def figure_calibration(npz_path, metrics_json, sweep_json, out, alpha):
+def figure_calibration(npz_path, metrics_json, sweep_json, out, alpha, nondim=False):
     d = np.load(npz_path)
     m = json.loads(Path(metrics_json).read_text())
     fig, axes = plt.subplots(1, 3, figsize=(figwidth("tmlr", "single"), 2.15))
@@ -126,7 +126,7 @@ def figure_calibration(npz_path, metrics_json, sweep_json, out, alpha):
     cov = [empirical_coverage(pred[t] - hw, pred[t] + hw, dns[t]) for t in range(pred.shape[0])]
     axes[1].plot(d["dns_t"], cov, color=STYLE_CYCLE[1][0], lw=1.0)
     axes[1].axhline(1 - alpha, color="k", ls=":", lw=0.8)
-    axes[1].set_xlabel(r"time $t$ (s)")
+    axes[1].set_xlabel(r"time $t$" + ("" if nondim else " (s)"))
     axes[1].set_ylabel(r"coverage (–)")
     axes[1].set_title(r"(b) coverage vs time ($u$)")
 
@@ -136,7 +136,7 @@ def figure_calibration(npz_path, metrics_json, sweep_json, out, alpha):
         w = m[key]["u"]["mean_width"]; wsc = m[key]["u"]["worst_slab_coverage"]
         axes[2].scatter(w, wsc, color=c, marker=mk, s=24, label=lab)
     axes[2].axhline(1 - alpha, color="k", ls=":", lw=0.8)
-    axes[2].set_xlabel(r"mean interval width (m/s)")
+    axes[2].set_xlabel(r"mean interval width" + ("" if nondim else " (m/s)"))
     axes[2].set_ylabel(r"worst-slab coverage (–)")
     axes[2].set_title(r"(c) coverage–width ($u$)")
     axes[2].legend(fontsize=5.5, loc="lower right")
@@ -234,14 +234,16 @@ def main() -> int:
     p.add_argument("--alpha", type=float, default=0.1)
     p.add_argument("--forcing-A", type=float, default=0.1)
     p.add_argument("--forcing-kf", type=float, default=2.0)
-    p.add_argument("--outdir", default="paper/tmlr-format/figures")
+    p.add_argument("--outdir", default="paper/pof-format/figures")
+    p.add_argument("--nondim", action="store_true",
+                   help="cp_calibration 的軸標籤不標 SI 單位（Kolmogorov 案已無因次）")
     args = p.parse_args()
     setup_style("tmlr")
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
     figure_mechanism(args.npz, args.metrics_json, str(outdir / "cp_mechanism"),
                      args.alpha, args.forcing_A, args.forcing_kf)
     figure_calibration(args.npz, args.metrics_json, args.sweep_json,
-                       str(outdir / "cp_calibration"), args.alpha)
+                       str(outdir / "cp_calibration"), args.alpha, nondim=args.nondim)
     figure_error_vs_time(args.npz, str(outdir / "cp_error_vs_time"))
     figure_acd(args.sweep_json, str(outdir / "cp_acd"))
     if args.pointwise_json:

@@ -43,6 +43,9 @@ class CylinderRunConfig:
     soap_precondition_frequency: int
     use_physics_denormalization: bool
     artifacts_dir: str
+    wandb: bool
+    wandb_project: str
+    wandb_weights_every: int
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="預設要求 gpu backend；本旗標允許 CPU（僅 smoke）")
     parser.add_argument("--resume", default=None,
                         help="CEXP-002 為 1-shot，禁止 resume；傳入即報錯")
+    parser.add_argument("--wandb", action="store_true",
+                        help="啟用 W&B 紀錄（等同 TOML wandb = true；見 pi_lnn_jax/tracking.py）")
     # 與 Kolmogorov 端同樣走 CLI（共用 TRAIN_SCHEMA 沒有這個鍵，而該檔在 §7.1 契約內，
     # 不為此加鍵）。預設 None = 不覆蓋，既有呼叫端行為不變。
     parser.add_argument("--soap_precondition_frequency", type=int, default=None,
@@ -121,6 +126,7 @@ class CylinderPolicy:
         "run.soap_b1": 0.95, "run.soap_b2": 0.95,
         "run.soap_precondition_frequency": 10,
         "run.artifacts_dir": "artifacts",
+        "run.wandb": False, "run.wandb_project": "pi-con", "run.wandb_weights_every": 500,
         "loss.bc_weight": 0.1, "loss.bc_body_weight": 2.0, "loss.bc_n": 128,
         "loss.gradnorm_freq": 25, "loss.gradnorm_ema_momentum": 0.9,
         "loss.gradnorm_min": 0.05, "loss.gradnorm_max": 0.0,
@@ -188,6 +194,8 @@ class CylinderPolicy:
             "time_marching": "curriculum.use_time_marching",
             "time_marching_start": "curriculum.time_marching_start",
             "time_marching_warmup": "curriculum.time_marching_warmup_fraction",
+            "wandb": "run.wandb", "wandb_project": "run.wandb_project",
+            "wandb_weights_every": "run.wandb_weights_every",
         }
         for key, path in train_map.items():
             if key in tk:
@@ -217,6 +225,8 @@ class CylinderPolicy:
             cli_values["run.n_collo"] = cli.n_collo
         if cli.seed is not None:
             cli_values["run.seed"] = cli.seed
+        if cli.wandb:
+            cli_values["run.wandb"] = True
         return (
             ConfigurationLayer("schema_default", self._defaults),
             ConfigurationLayer("toml", toml),

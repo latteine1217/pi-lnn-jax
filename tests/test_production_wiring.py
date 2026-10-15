@@ -227,3 +227,60 @@ def test_resume_diagnostic_failure_cannot_abort_finalize():
                if isinstance(n, ast.Constant) and isinstance(n.value, str)
                and "unavailable_reason" in n.value]
     assert reasons, "接住之後必須寫下 unavailable_reason，否則就是靜默吞掉"
+
+
+# ── encoder／監督 stride 拆開（K–Δt 2×2 消融）─────────────────────────────────
+#
+# 拆開之後 `ReBatch.sensor_vals` 只代表**監督目標**。任何 encode 呼叫若還直接吃它，
+# 在消融臂上就會拿監督的時間軸去餵 encoder——loss 與 probe 量到不同的東西，而且
+# 不會報錯。單元測試證明了 encoder_context 本身正確；這裡釘的是「呼叫點都經過它」。
+
+def _encode_calls(tree: ast.AST):
+    """所有 `model.apply(..., method=<X>.encode)` 呼叫。"""
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "apply"):
+            continue
+        for kw in node.keywords:
+            if (kw.arg == "method" and isinstance(kw.value, ast.Attribute)
+                    and kw.value.attr == "encode"):
+                yield node
+
+
+def test_no_encode_call_reads_the_supervision_array_directly():
+    tree = ast.parse((ROOT / "pipeline/kolmogorov/assembly.py").read_text())
+    calls = list(_encode_calls(tree))
+    assert len(calls) >= 3, f"預期 loss／probe data／probe physics 至少三處 encode，找到 {len(calls)}"
+    for c in calls:
+        data_arg = ast.unparse(c.args[1]) if len(c.args) > 1 else ""
+        assert data_arg not in ("sensor_vals", "re_batch.sensor_vals"), (
+            f"line {c.lineno}: encode 直接吃監督陣列 `{data_arg}`——應取自 encoder_context")
+
+
+@pytest.mark.parametrize("fn", ["run_loop", "finalize"])
+def test_in_training_evals_take_context_from_encoder_context(fn):
+    node = _fn("pipeline/kolmogorov/run.py", fn)
+    evals = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "evaluate_against_dns"]
+    assert evals, f"{fn} 內找不到 evaluate_against_dns"
+    for c in evals:
+        ctx_arg = ast.unparse(c.args[2])
+        assert "sensor_vals" not in ctx_arg, (
+            f"{fn} line {c.lineno}: eval 情境直接取 `{ctx_arg}`——應取自 encoder_context")
+    assert any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "encoder_context" for n in ast.walk(node)), \
+        f"{fn} 沒有呼叫 encoder_context"
+
+
+def test_build_context_guards_and_forwards_both_strides():
+    node = _fn("pipeline/kolmogorov/assembly.py", "build_context")
+    names = {n.func.id for n in ast.walk(node)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "check_encoder_target_strides" in names, "build_context 沒有呼叫 stride 守門"
+    mk = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+          and isinstance(n.func, ast.Name) and n.func.id == "_make_re_batch"]
+    assert mk, "build_context 沒有建 ReBatch"
+    for c in mk:
+        kws = {kw.arg for kw in c.keywords}
+        assert {"encoder_time_stride", "target_time_stride"} <= kws, (
+            f"line {c.lineno}: _make_re_batch 沒有收到兩個 stride——設定會被靜默忽略")

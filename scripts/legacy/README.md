@@ -22,6 +22,10 @@
 - **D. bench/profile sbatch（`slurm/`）** — `bench_*.sbatch`、`profile_*.sbatch`。
   一次性效能量測腳本。
 
+- **E. folx stop_gradient 探針（`slurm/`）** — `probe_folx_ab.sbatch`、`probe_perf_folx_chunk.sbatch`。
+  stop_gradient 迴避實測無效；其 A/B 開關 `PILNN_WRAP_STOPGRAD` 已隨程式端移除，
+  現在重跑兩臂相同，只作該否證的來源保留。
+
 ## 未納入歸檔（刻意保留）
 
 - `scripts/generate_architecture.py` — deterministic 論文架構圖生成器，仍是被追蹤的論文資產來源。

@@ -127,7 +127,7 @@ def trig_design_diagnostics(pos_uv, kmax=5, rcond=DEFAULT_TRIG_RCOND) -> dict:
     }
 
 
-def divfree_trig_lsq(pos_uv, u_s, v_s, grid_xy, kmax=5, rcond=DEFAULT_TRIG_RCOND):
+def divfree_trig_lsq(pos_uv, u_s, v_s, grid_xy, kmax=5, rcond=DEFAULT_TRIG_RCOND, modes=None):
     """stream function ψ=Σ ψ_k e^{2πik·x}，u=∂ψ/∂y，v=-∂ψ/∂x → 自動無散度。
     未知＝各模態 ψ_k 實/虛部 ＋ 均流 (u0,v0)。LSQ 擬合感測 (u,v)。
 
@@ -137,7 +137,8 @@ def divfree_trig_lsq(pos_uv, u_s, v_s, grid_xy, kmax=5, rcond=DEFAULT_TRIG_RCOND
     之上就被「反轉」而非截斷，係數暴增——實測 ||coef|| 5.7e4、重建 rel-L2 7.4e4。
     直接分解 A 而非 A^T A 也避免把條件數平方。
     """
-    modes = _divfree_modes(kmax)
+    if modes is None:
+        modes = _divfree_modes(kmax)
     A = _trig_design(pos_uv, modes)
     b = np.concatenate([u_s, v_s])
     coef = np.linalg.lstsq(A, b, rcond=rcond)[0]
@@ -145,6 +146,75 @@ def divfree_trig_lsq(pos_uv, u_s, v_s, grid_xy, kmax=5, rcond=DEFAULT_TRIG_RCOND
     pred = G @ coef
     M = grid_xy.shape[0]
     return pred[:M], pred[M:]
+
+
+def _divfree_modes_disk(kc):
+    """圓盤 |k| ≤ kc 內的半平面模態（與 `_divfree_modes` 同樣排除 k=0 與共軛重複）。
+
+    方形 |k_x|,|k_y| ≤ kmax 會保留對角角落的高波數而漏掉軸向的；投影地板與可觀測性
+    分析都用圓盤，基線用同一個形狀才可比。
+    """
+    return [(m, n) for (m, n) in _divfree_modes(int(np.ceil(kc)))
+            if m * m + n * n <= kc * kc]
+
+
+def _periodic_images(pos, vals):
+    """把感測點與其值複製到 3×3 個週期像（單位方域），供非週期核做週期插值。"""
+    shifts = np.array([(i, j) for i in (-1, 0, 1) for j in (-1, 0, 1)], dtype=np.float64)
+    pos = np.asarray(pos, dtype=np.float64)
+    tiled_pos = (pos[None, :, :] + shifts[:, None, :]).reshape(-1, 2)
+    return tiled_pos, np.tile(np.asarray(vals, dtype=np.float64), len(shifts))
+
+
+def rbf_multiquadric_periodic(pos, vals, grid_xy, epsilon):
+    """週期像上的 multiquadric RBF：鄰近邊界的查詢點看得到跨邊界的感測器。"""
+    tp, tv = _periodic_images(pos, vals)
+    return rbf_multiquadric(tp, tv, grid_xy, epsilon)
+
+
+def idw_periodic(pos, vals, grid_xy, p, eps=1e-12):
+    """最小像距離（minimum image）的 IDW：單位週期方域上的距離。"""
+    delta = grid_xy[:, None, :] - np.asarray(pos, dtype=np.float64)[None, :, :]
+    delta -= np.round(delta)
+    d = np.linalg.norm(delta, axis=-1)
+    exact = d < eps
+    w = 1.0 / (d ** p + eps)
+    out = (w @ vals) / w.sum(axis=1)
+    hit = exact.any(axis=1)
+    if hit.any():
+        out[hit] = vals[exact[hit].argmax(axis=1)]
+    return out
+
+
+def sensor_cv_error(fit_predict, pos, sensor_phys, frames, folds, seed=0):
+    """leave-sensors-out 交叉驗證誤差：只用感測器資料，不讀參考場。
+
+    感測點隨機分成 `folds` 組；每組輪流留出，以其餘感測器重建留出點的 (u, v)，
+    在 `frames` 上累加平方誤差。回傳向量相對 L2 = √(Σ‖pred−true‖² / Σ‖true‖²)。
+    `fit_predict(pos_tr, u_tr, v_tr, pos_te) -> (u_te, v_te)`。
+    """
+    K = pos.shape[0]
+    if folds < 2 or folds > K:
+        raise ValueError(f"folds={folds} 須在 [2, K={K}]")
+    perm = np.random.default_rng(seed).permutation(K)
+    groups = np.array_split(perm, folds)
+    num = den = 0.0
+    for t in frames:
+        u_all, v_all = sensor_phys[t, :, 0], sensor_phys[t, :, 1]
+        for g in groups:
+            tr = np.setdiff1d(np.arange(K), g)
+            u_p, v_p = fit_predict(pos[tr], u_all[tr], v_all[tr], pos[g])
+            num += np.sum((u_p - u_all[g]) ** 2 + (v_p - v_all[g]) ** 2)
+            den += np.sum(u_all[g] ** 2 + v_all[g] ** 2)
+    return float(np.sqrt(num / den))
+
+
+def select_by_sensor_cv(make_fit_predict, candidates, pos, sensor_phys, frames, folds, seed=0):
+    """對每個候選超參數算 `sensor_cv_error`，回傳 (最佳值, {候選: 誤差})。並列取第一個。"""
+    curve = {c: sensor_cv_error(make_fit_predict(c), pos, sensor_phys, frames, folds, seed)
+             for c in candidates}
+    best = min(candidates, key=lambda c: curve[c])
+    return best, curve
 
 
 def _resolve_les_path(path):
@@ -284,6 +354,16 @@ def main():
     ap.add_argument("--projection-floor-dns-mean", action="store_true",
                     help="地板另評一組把 LES 時均場換成 DNS 時均場的變體（模態不變）。"
                          "用來分離「基底方向不對」與「兩個流場的平均量不同」")
+    ap.add_argument("--extended", action="store_true",
+                    help="另加三個變體：圓盤 div-free LSQ、週期 RBF、週期 IDW，各自的超參數"
+                         "（kc／ε／p）由 leave-sensors-out 交叉驗證選定——只用感測器資料，"
+                         "不讀參考場。不給則本腳本行為與新增此旗標前逐字相同")
+    ap.add_argument("--cv-folds", type=int, default=10, help="--extended 的感測器分組數")
+    ap.add_argument("--cv-frame-every", type=int, default=10,
+                    help="--extended 的 CV 每隔幾幀取一幀（控成本；選超參數不需每幀）")
+    ap.add_argument("--cv-trig-kc", type=float, nargs="+", default=[3, 4, 5, 6, 7, 8])
+    ap.add_argument("--cv-rbf-eps", type=float, nargs="+", default=[1, 2, 5, 10, 20, 50])
+    ap.add_argument("--cv-idw-p", type=float, nargs="+", default=[1, 1.5, 2, 3, 4])
     ap.add_argument("--re", type=float, default=None,
                     help="Reynolds number；ν=1/Re 供 band/γ 的 k_η 邊界使用。未給則不產出 band/γ 欄位（不猜、不套預設）")
     ap.add_argument("--output", default="artifacts/baseline_eval/tab_fair_metrics.json")
@@ -335,6 +415,46 @@ def main():
               f"({trig_diag['trig_ncol'] - trig_diag['trig_rank']} 個方向被截斷)："
               f"佈點無法分辨 kmax={a.trig_kmax} 帶內的全部模態（規則晶格的典型徵狀）。"
               f"該 baseline 的誤差含此不可識別性，不只是方法本身的能力")
+    ext_details: dict = {}
+    if a.extended:
+        pos64 = np.asarray(pos, dtype=np.float64)
+        cv_frames = list(range(0, T, a.cv_frame_every))
+        cv_meta = {"cv_folds": a.cv_folds, "cv_frames": cv_frames, "cv_seed": 0,
+                   "cv_reads_reference_field": False}
+
+        def _trig_fp(kc):
+            m = _divfree_modes_disk(kc)
+            return lambda ptr, utr, vtr, pte: divfree_trig_lsq(
+                ptr, utr, vtr, pte, rcond=a.trig_rcond, modes=m)
+
+        def _rbf_fp(eps):
+            return lambda ptr, utr, vtr, pte: (rbf_multiquadric_periodic(ptr, utr, pte, eps),
+                                               rbf_multiquadric_periodic(ptr, vtr, pte, eps))
+
+        def _idw_fp(pw):
+            return lambda ptr, utr, vtr, pte: (idw_periodic(ptr, utr, pte, pw),
+                                               idw_periodic(ptr, vtr, pte, pw))
+
+        selected = {}
+        for name, mk, cands, key in (("divfree_trig_lsq_disk", _trig_fp, a.cv_trig_kc, "trig_kc"),
+                                     ("rbf_multiquadric_periodic", _rbf_fp, a.cv_rbf_eps, "rbf_eps"),
+                                     ("idw_periodic", _idw_fp, a.cv_idw_p, "idw_p")):
+            best, curve = select_by_sensor_cv(mk, list(cands), pos64, sensor_phys, cv_frames,
+                                              a.cv_folds)
+            selected[name] = best
+            ext_details[name] = {**cv_meta, key: best,
+                                 "cv_curve": {str(c): e for c, e in curve.items()}}
+            print(f"[cv] {name}: {key}={best}  " +
+                  "  ".join(f"{c}:{e:.4f}" for c, e in curve.items()))
+        kc_modes = _divfree_modes_disk(selected["divfree_trig_lsq_disk"])
+        methods["divfree_trig_lsq_disk"] = lambda p, u, v: divfree_trig_lsq(
+            p, u, v, grid, rcond=a.trig_rcond, modes=kc_modes)
+        methods["rbf_multiquadric_periodic"] = lambda p, u, v: (
+            rbf_multiquadric_periodic(p, u, grid, selected["rbf_multiquadric_periodic"]),
+            rbf_multiquadric_periodic(p, v, grid, selected["rbf_multiquadric_periodic"]))
+        methods["idw_periodic"] = lambda p, u, v: (
+            idw_periodic(p, u, grid, selected["idw_periodic"]),
+            idw_periodic(p, v, grid, selected["idw_periodic"]))
     # gappy-POD 是 opt-in：不給 --les-basis 時 methods 與此旗標存在前逐字相同，
     # 既有三列因此可逐位元回歸。
     gappy_details: dict = {}
@@ -413,6 +533,7 @@ def main():
                 "trig_kmax": a.trig_kmax,
                 **(trig_diag if name == "divfree_trig_lsq" else {}),
                 **(gappy_details if name == "gappy_pod_les" else {}),
+                **ext_details.get(name, {}),
             },
         )
         print(f"[out] canonical artifact written ({name})")

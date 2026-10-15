@@ -13,9 +13,11 @@ POC 簡化：
 """
 from __future__ import annotations
 
+import functools
 import os
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -38,6 +40,41 @@ from pi_lnn_jax.metric_artifact import (
 )
 
 
+# ── jit 的 forward 入口 ──
+# model 為 static（Flax Module 依欄位值 hash/eq），故同一 model 同 shape 在 process 內只編譯
+# 一次；params 走引數而非 closure，避免把整份權重當常數烘進 executable。
+@functools.partial(jax.jit, static_argnums=0)
+def _encode(model, params, sensor_vals, sensor_pos, re_norm, sensor_time):
+    return model.apply(params, sensor_vals, sensor_pos, re_norm, sensor_time,
+                       method=LiquidOperator.encode)
+
+
+@functools.partial(jax.jit, static_argnums=0)
+def _decode(model, params, xy, t_q, h_states, sensor_time, sensor_pos):
+    return model.apply(params, xy, t_q, h_states, sensor_time, sensor_pos,
+                       method=LiquidOperator.decode_query)
+
+
+@functools.partial(jax.jit, static_argnums=0)
+def _apply(model, params, sensor_vals, sensor_pos, re_norm, sensor_time, xy, t_q):
+    return model.apply(params, sensor_vals, sensor_pos, re_norm, sensor_time, xy, t_q)
+
+
+def _make_query_fn(model, params, sensor_vals, sensor_pos, re_norm, sensor_time):
+    """回傳 `f(xy [n,2], t_q [n]) -> [n, 3]` normalized 的查詢函式。
+
+    Why encode 在此預算: sensor 編碼（spatial encoder + CfC scan over T）與查詢點、查詢時刻
+    都無關；經 `__call__` 逐 chunk 前向時它在每個 chunk × 每個時刻重跑一次（K=200/T=101/256²
+    即 ~6,700 次）。LiquidOperator 有 encode/decode_query 拆分 → 預算一次；B0/PINN 無此拆分
+    （見 physics.make_ns_residual_fn_baseline），走 jit 的完整 forward。
+    """
+    if isinstance(model, LiquidOperator):
+        h_states = _encode(model, params, sensor_vals, sensor_pos, re_norm, sensor_time)
+        return lambda xy, t_q: _decode(model, params, xy, t_q, h_states, sensor_time, sensor_pos)
+    return lambda xy, t_q: _apply(
+        model, params, sensor_vals, sensor_pos, re_norm, sensor_time, xy, t_q)
+
+
 def reconstruct_field(
     model: LiquidOperator,
     params,
@@ -58,7 +95,26 @@ def reconstruct_field(
     axis convention（極關鍵，對齊 pi-lnn DNS）:
       x_grid 對應 axis_1 (row index)，y_grid 對應 axis_2 (col index)
       → output shape (Nx, Ny)，u[i, j] 對應 (x_grid[i], y_grid[j])
+
+    多時刻重建請走 evaluate_time_series / evaluate_against_dns：它們整個評估只 encode 一次，
+    本函式每次呼叫 encode 一次。
     """
+    query_fn = _make_query_fn(model, params, sensor_vals, sensor_pos, re_norm, sensor_time)
+    return _reconstruct(query_fn, int(sensor_pos.shape[0]), norm_stats,
+                        x_grid, y_grid, t_slice, chunk_size, return_p)
+
+
+def _reconstruct(
+    query_fn,
+    K_sensors: int,
+    norm_stats: dict,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    t_slice: float,
+    chunk_size: int = 4096,
+    return_p: bool = False,
+) -> tuple:
+    """reconstruct_field 的本體，查詢函式由 caller 預建（見 _make_query_fn）。"""
     if return_p and ("p_mean" not in norm_stats or "p_std" not in norm_stats):
         raise KeyError(
             "norm_stats 無 p_mean/p_std；此 checkpoint/dataset 未含 p 通道，無法 return_p"
@@ -66,7 +122,6 @@ def reconstruct_field(
     Nx, Ny = len(x_grid), len(y_grid)
     xx, yy = np.meshgrid(x_grid, y_grid, indexing='ij')  # [Nx, Ny]
     xy_flat = np.stack([xx.ravel(), yy.ravel()], axis=-1).astype(np.float32)  # [Nx*Ny, 2]
-    t_flat = np.full((Nx * Ny,), float(t_slice), dtype=np.float32)
 
     # 分塊 forward 避免 memory peak。大 K：decode cross-attention 中介 ∝ chunk×K×d_model，
     # chunk=4096 在 K>128 會於 XLA autotuning OOM。forward-only；每個 query 點的輸出只依賴
@@ -82,21 +137,24 @@ def reconstruct_field(
     u_phys_list, v_phys_list = [], []
     p_phys_list = []
     n_total = xy_flat.shape[0]
-    K_sensors = int(sensor_pos.shape[0])
     _chunk_budget = int(os.environ.get("PILNN_EVAL_CHUNK_BUDGET", "200000"))
     eff_chunk = chunk_size if K_sensors <= 128 else max(256, _chunk_budget // K_sensors)
+    eff_chunk = min(eff_chunk, n_total)
+    # 每塊固定 shape [eff_chunk]：最後一塊不足時補零點再截掉，jit 只編譯一次。
+    # 補的點不影響真實點——同上，查詢點逐點獨立。
+    t_chunk = jnp.full((eff_chunk,), float(t_slice), dtype=jnp.float32)
     for i in range(0, n_total, eff_chunk):
-        chunk_xy = jnp.asarray(xy_flat[i:i + eff_chunk])
-        chunk_t = jnp.asarray(t_flat[i:i + eff_chunk])
-        pred = model.apply(
-            params, sensor_vals, sensor_pos, re_norm, sensor_time, chunk_xy, chunk_t,
-        )  # [chunk, 3] normalized
-        u_phys = np.asarray(pred[:, 0]) * norm_stats["u_std"] + norm_stats["u_mean"]
-        v_phys = np.asarray(pred[:, 1]) * norm_stats["v_std"] + norm_stats["v_mean"]
+        chunk_xy = xy_flat[i:i + eff_chunk]
+        n_valid = chunk_xy.shape[0]
+        if n_valid < eff_chunk:
+            chunk_xy = np.pad(chunk_xy, ((0, eff_chunk - n_valid), (0, 0)))
+        pred = np.asarray(query_fn(jnp.asarray(chunk_xy), t_chunk))[:n_valid]  # [n, 3] normalized
+        u_phys = pred[:, 0] * norm_stats["u_std"] + norm_stats["u_mean"]
+        v_phys = pred[:, 1] * norm_stats["v_std"] + norm_stats["v_mean"]
         u_phys_list.append(u_phys)
         v_phys_list.append(v_phys)
         if return_p:
-            p_phys = np.asarray(pred[:, 2]) * norm_stats["p_std"] + norm_stats["p_mean"]
+            p_phys = pred[:, 2] * norm_stats["p_std"] + norm_stats["p_mean"]
             p_phys_list.append(p_phys)
     u = np.concatenate(u_phys_list).reshape(Nx, Ny)
     v = np.concatenate(v_phys_list).reshape(Nx, Ny)
@@ -134,12 +192,13 @@ def evaluate_against_dns(
         Ny = dns_u.shape[2]
         y_grid = np.linspace(0.0, 1.0, Ny, endpoint=False).astype(np.float32)
 
+    query_fn = _make_query_fn(model, params, sensor_vals, sensor_pos, re_norm, sensor_time)
+    K_sensors = int(sensor_pos.shape[0])
     results = []
     for tidx in eval_t_indices:
         t_slice = float(dns_t[tidx])
-        u_pred, v_pred = reconstruct_field(
-            model, params, sensor_vals, sensor_pos, re_norm, sensor_time,
-            norm_stats, x_grid, y_grid, t_slice,
+        u_pred, v_pred = _reconstruct(
+            query_fn, K_sensors, norm_stats, x_grid, y_grid, t_slice,
         )
         metrics = compute_metrics(u_pred, v_pred, dns_u[tidx], dns_v[tidx])
         metrics["t_slice"] = t_slice
@@ -191,19 +250,20 @@ def evaluate_time_series(
     metrics_per_t = []
     u_fields = np.zeros((T, Nx, Ny), dtype=np.float32) if collect_fields else None
     v_fields = np.zeros((T, Nx, Ny), dtype=np.float32) if collect_fields else None
+    # sensor encode 整個評估只做一次（見 _make_query_fn）
+    query_fn = _make_query_fn(model, params, sensor_vals, sensor_pos, re_norm, sensor_time)
+    K_sensors = int(sensor_pos.shape[0])
     for tidx in range(T):
         t_slice = float(dns_t[tidx])
         if eval_p:
-            u_pred, v_pred, p_pred = reconstruct_field(
-                model, params, sensor_vals, sensor_pos, re_norm, sensor_time,
-                norm_stats, x_grid, y_grid, t_slice, return_p=True,
+            u_pred, v_pred, p_pred = _reconstruct(
+                query_fn, K_sensors, norm_stats, x_grid, y_grid, t_slice, return_p=True,
             )
             m = compute_metrics(u_pred, v_pred, dns_u[tidx], dns_v[tidx],
                                 p_pred=p_pred, p_dns=dns_p[tidx], nu=nu)
         else:
-            u_pred, v_pred = reconstruct_field(
-                model, params, sensor_vals, sensor_pos, re_norm, sensor_time,
-                norm_stats, x_grid, y_grid, t_slice,
+            u_pred, v_pred = _reconstruct(
+                query_fn, K_sensors, norm_stats, x_grid, y_grid, t_slice,
             )
             m = compute_metrics(u_pred, v_pred, dns_u[tidx], dns_v[tidx], nu=nu)
         m["t"] = t_slice

@@ -46,6 +46,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from journal_style import setup_style, save_figure  # noqa: E402
+from _common.units import unit
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -72,6 +73,10 @@ def main() -> int:
                     help="原生寬度（預設 = thesis 的 0.7\\linewidth，縮放係數 1）")
     ap.add_argument("--out", default=str(repo / "paper" / "thesis-format"
                                          / "figures" / "architecture"))
+    ap.add_argument("--venue", default="thesis",
+                    help="journal_style venue：決定字體與框線（thesis / tmlr；PoF 稿用 tmlr 的 serif 樣式）")
+    ap.add_argument("--nondim", action="store_true",
+                    help="軸標籤不標 SI 單位（PoF 稿）；預設標 SI（thesis）")
     args = ap.parse_args()
 
     meta_path = _resolve_data_path(args.sensors)
@@ -115,7 +120,7 @@ def main() -> int:
     print(f"[check] K={meta['K']} 個座標，x∈[{coords[:,0].min():.3f},{coords[:,0].max():.3f}] "
           f"y∈[{coords[:,1].min():.3f},{coords[:,1].max():.3f}]")
 
-    setup_style("thesis")
+    setup_style(args.venue)
     fig, ax = plt.subplots(figsize=(args.width_in, args.width_in * 0.865))
     ax.grid(False)
     im = ax.imshow(w.T, origin="lower", extent=(0, 1, 0, 1), cmap="RdBu_r",
@@ -123,13 +128,14 @@ def main() -> int:
     ax.scatter(coords[:, 0], coords[:, 1], s=14, facecolors="white",
                edgecolors="black", linewidths=0.6, zorder=3,
                label=f"$K={meta['K']}$ sensors (QR-pivot on LES)")
-    ax.set_xlabel("$x$ (m)")
-    ax.set_ylabel("$y$ (m)")
+    ax.set_xlabel("$x$" + unit("m", args.nondim))
+    ax.set_ylabel("$y$" + unit("m", args.nondim))
     ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-    ax.legend(loc="upper right", fontsize=LEGEND_PT, framealpha=0.9,
+    # frameon 明寫：serif venue 預設無框，圖例會直接疊在渦度場與感測點上。
+    ax.legend(loc="upper right", fontsize=LEGEND_PT, frameon=True, framealpha=0.9,
               handletextpad=0.3, borderpad=0.35)
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-    cb.set_label(r"$\omega$ (1/s)")
+    cb.set_label(r"$\omega$" + unit("1/s", args.nondim))
 
     for p in save_figure(fig, str(Path(args.out) / "les_T50_vorticity_with_sensors")):
         print(f"[write] {p}")

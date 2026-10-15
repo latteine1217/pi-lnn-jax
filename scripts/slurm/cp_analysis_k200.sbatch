@@ -34,6 +34,7 @@ cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
 
 export PYTHONUNBUFFERED=1
 export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # No GPU is allocated to this job; pin JAX to CPU so it cannot contend for a card
 # that slurm did not grant us.

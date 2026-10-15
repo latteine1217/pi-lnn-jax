@@ -61,5 +61,5 @@ for yi, e in zip(y, ke_err):
 ax2.set_title(r"(b) Accuracy (parity)", fontsize=8)
 
 fig.tight_layout(w_pad=1.2)
-save_figure(fig, _REPO_ROOT / "paper/tmlr-format/figures/speedup_stack")
+save_figure(fig, _REPO_ROOT / "paper/pof-format/figures/speedup_stack")
 print("saved speedup_stack.pdf/.png")

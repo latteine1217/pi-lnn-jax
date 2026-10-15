@@ -89,6 +89,7 @@ def resolve_protocol(
     cli_time_stride: int | None = None,
     sensor_T: int | None = None,
     reason: str | None = None,
+    query_time_stride: int | None = None,
 ) -> EvaluationProtocol:
     """把「訓練宣告 + 呼叫端明示的模式」解析成一份協定。
 
@@ -100,6 +101,11 @@ def resolve_protocol(
         cli_time_stride: 呼叫端明示的 stride。
         sensor_T: sensor 截斷幀數；None 表示用全部。
         reason: `fixed_grid` 必填，說明為何刻意偏離訓練 cadence。
+        query_time_stride: 僅 `sensor_time_independent`。查詢格點（DNS）的 stride；
+            None = 與 sensor 同一個 stride（既有行為）。用途是讓情境照訓練的 stride
+            載入、而在兩個 sensor 幀之間查詢——情境必須與訓練走同一條載入路徑，
+            norm_stats 才會逐位元相同（預先下採樣的檔因 float32 加總順序不同而過不了
+            verify_norm_stats 的 1e-9）。
 
     Raises:
         ValueError: 模式不合法、stride 非正、follow_training 下 CLI 與訓練不一致、
@@ -108,9 +114,14 @@ def resolve_protocol(
     """
     mode = ProtocolMode(mode)  # 打錯字不該變成一個新協定
 
-    for name, value in (("cli_time_stride", cli_time_stride), ("sensor_T", sensor_T)):
+    for name, value in (("cli_time_stride", cli_time_stride), ("sensor_T", sensor_T),
+                        ("query_time_stride", query_time_stride)):
         if value is not None and int(value) <= 0:
             raise ValueError(f"{name} 須為正整數，收到 {value}")
+    if query_time_stride is not None and mode is not ProtocolMode.SENSOR_TIME_INDEPENDENT:
+        raise ValueError(
+            f"query_time_stride 只適用 sensor_time_independent（收到 {mode.value}）："
+            "對齊模式下查詢格點就是 sensor 時刻，另給一個 stride 沒有意義")
 
     strides = [int(s) for s in training_time_strides]
     if any(s <= 0 for s in strides):
@@ -163,13 +174,16 @@ def resolve_protocol(
         raise ValueError(
             "sensor_time_independent 需明示 stride：它同時是 query 格點的解析度")
     stride = int(cli_time_stride)
+    q_stride = stride if query_time_stride is None else int(query_time_stride)
     return EvaluationProtocol(
         mode=mode, sensor_time_stride=stride,
         # 此模式下 DNS 的 stride 是 query 解析度，不是對齊用的。
-        dns_time_stride=stride,
+        dns_time_stride=q_stride,
         training_time_stride=training_stride,
         basis=(f"sensor 時間軸與 DNS 無關（thesis §7.2 間歇評估），"
-               f"query 格點 stride={stride}（{training_basis}）"),
+               f"query 格點 stride={q_stride}（{training_basis}）"
+               + ("" if query_time_stride is None else
+                  f"；sensor 情境 stride={stride} 與 query 分開指定")),
         sensor_T=sensor_T,
     )
 
@@ -302,3 +316,20 @@ def training_time_strides_from_config(config_path) -> list[int]:
 
     dk = load_config(config_path)["data_kwargs"]
     return [int(s) for s in dk.get("time_strides", [])]
+
+
+def encoder_time_stride_from_config(config_path) -> int:
+    """從 TOML 讀 `[train] encoder_time_stride`（缺省 1 = encoder 吃整條已載入序列）。
+
+    Why evaluator 需要它：模型必須在評估時看到**訓練時 encoder 看到的那個情境**。
+    encoder／監督 stride 拆開的消融臂上，監督目標與 encoder 輸入是兩條不同的時間軸；
+    evaluator 若照舊把整條序列餵給 encoder，量到的就是一個訓練時沒見過的輸入。
+    與 `training_time_strides_from_config` 放在一起，「eval 吃什麼」只有一個答案。
+    """
+    from pi_lnn_jax.config import load_config
+
+    tk = load_config(config_path)["train_kwargs"]
+    stride = int(tk.get("encoder_time_stride", 1))
+    if stride < 1:
+        raise ValueError(f"{config_path}: encoder_time_stride 必須 ≥1，收到 {stride}")
+    return stride

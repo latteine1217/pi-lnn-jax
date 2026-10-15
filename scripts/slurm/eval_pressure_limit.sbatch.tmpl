@@ -1,0 +1,104 @@
+#!/bin/bash
+#SBATCH --job-name=jax_plimit
+#SBATCH --output=@JOB_DIR@/logs/jax_plimit_%j.out
+#SBATCH --error=@JOB_DIR@/logs/jax_plimit_%j.err
+#SBATCH --time=24:00:00
+#SBATCH --partition=r740
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --mem=48G
+#
+# What:
+#   thesis 附錄壓力表（appendix04）的重產：對清單上每個 run 依序執行
+#   scripts/eval_pressure_limit.py，每個 run 寫一份 @JOB_DIR@/out/<run>.json。
+#   參考壓力由 DNS 的 (u,v) 解 Poisson，不讀 DNS 的 p（見腳本 docstring）。
+#
+# Why 腳本在 job 目錄、cwd 在 repo:
+#   腳本以未追蹤檔形式放在 @JOB_DIR@/scripts/（不進 git tree），但要用 repo 的
+#   .venv 與 editable 的 pi_lnn_jax，所以 cd 到 @REPO@ 再以絕對路徑呼叫。
+#   腳本的 sha256 與 repo 的 git sha 都會寫進每份輸出，下方也先印一次。
+#
+# Why 一個 run 失敗不中止整個 job:
+#   每個 run 各有自己的 uv 指紋閘門；一個 run 對不上不代表其他 run 的數字有問題。
+#   失敗的 run 不寫輸出檔、在結尾列出，job 以非零結束。
+#
+# 由 scripts/slurm/render_eval_pressure_limit.sh 展開 job 目錄、repo 路徑與 run 清單三個
+# placeholder；不要手動編輯展開後的檔案，改清單請改 render 腳本。
+#
+# 成本參考：full-T 重建（T=101、256²）既有 eval_v2 每個 run 約 20–25 min。
+
+set -euo pipefail
+
+JOB_DIR="@JOB_DIR@"
+REPO="@REPO@"
+cd "${REPO}"
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${PYTHONPATH:-}:."
+export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
+[ -d "$PILNJAX_DATA_ROOT/data" ] || { echo "[ERR] PILNJAX_DATA_ROOT=$PILNJAX_DATA_ROOT 內無 data/ 目錄" >&2; exit 4; }
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
+export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
+[ -x .venv/bin/python ] || { echo "[ERR] ${REPO}/.venv 不存在" >&2; exit 3; }
+export JAX_PLATFORMS=cuda
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# 與既有評估 eval_v2_chunk400k 相同的分塊預算（K=200 → chunk 2000；K≤128 不受影響）。
+export PILNN_EVAL_CHUNK_BUDGET=400000
+
+# arm|artifacts_dir|config|expect_metrics
+RUNS=(
+@RUN_TABLE@
+)
+
+echo "======================================================================"
+echo "[JAX-PLIMIT] $(date '+%F %T')  job=${SLURM_JOB_ID:-?}  node=${SLURMD_NODENAME:-?}"
+echo "  repo:    ${REPO} @ $(git -C "${REPO}" rev-parse HEAD)"
+echo "  script:  $(sha256sum "${JOB_DIR}/scripts/eval_pressure_limit.py")"
+echo "  runs:    ${#RUNS[@]}"
+echo "======================================================================"
+
+# 先確認所有輸入都在，缺一個就整個 job 不開跑（不要跑了四小時才在第九個 run 發現）
+for entry in "${RUNS[@]}"; do
+  IFS='|' read -r arm art cfg expect <<< "${entry}"
+  for f in "${cfg}" "${expect}" "${art}/summary.json"; do
+    [ -f "$f" ] || { echo "[ERR] ${arm}: 缺檔 $f" >&2; exit 6; }
+  done
+  [ -d "${art}/checkpoints" ] || { echo "[ERR] ${arm}: 缺 ${art}/checkpoints" >&2; exit 6; }
+done
+mkdir -p "${JOB_DIR}/out"
+
+nvidia-smi -L 2>/dev/null || echo "[WARN] nvidia-smi 不可用"
+uv run python -c "import jax; print(f'JAX {jax.__version__}  devices={jax.devices()}')"
+# cuDNN preflight（防 venv 漂移白跑）
+uv run python -c "import jax, jax.numpy as jnp; from jax import lax; lax.conv_general_dilated(jnp.ones((1,8,8,1)), jnp.ones((3,3,1,1)), (1,1), 'SAME', dimension_numbers=('NHWC','HWIO','NHWC')).block_until_ready()" \
+  || { echo '[ERR] cuDNN preflight 失敗 → head node 跑 scripts/slurm/setup_gpu_venv.sh 後重送' >&2; exit 5; }
+
+FAILED=()
+for entry in "${RUNS[@]}"; do
+  IFS='|' read -r arm art cfg expect <<< "${entry}"
+  run="$(basename "${art}")"
+  echo "---------------------------------------------------------------------"
+  echo "[$(date '+%F %T')] ${arm}  ${run}"
+  if ! uv run python -u "${JOB_DIR}/scripts/eval_pressure_limit.py" \
+      --arch liquid \
+      --protocol follow_training \
+      --arm "${arm}" \
+      --config "${cfg}" \
+      --artifacts-dir "${art}" \
+      --expect-metrics "${expect}" \
+      --out "${JOB_DIR}/out/${run}.json"; then
+    echo "[FAIL] ${arm} ${run}" >&2
+    FAILED+=("${run}")
+  fi
+done
+
+echo "======================================================================"
+echo "[$(date '+%F %T')] 完成 $(( ${#RUNS[@]} - ${#FAILED[@]} ))/${#RUNS[@]}  輸出：${JOB_DIR}/out/"
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  echo "[FAIL] ${FAILED[*]}" >&2
+  exit 1
+fi

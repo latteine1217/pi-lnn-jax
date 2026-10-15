@@ -105,6 +105,43 @@ def test_sensor_time_independent_does_not_align_and_strides_the_query_grid():
     assert p.sensor_time_stride == 2
 
 
+def test_query_stride_decouples_the_query_grid_from_the_sensor_context():
+    """情境照訓練的 stride 載入、查詢走另一個 stride——在兩個 sensor 幀之間評估。
+
+    Why 不能改用「預先下採樣的 sensor 檔」：同樣的值，float32 mean 在 stride view 與
+    連續陣列上的加總順序不同（實測 u_mean 相對差 5e-7），過不了 verify_norm_stats 的
+    1e-9。情境必須與訓練以**同一個路徑**載入，所以要拆的是查詢那一側。"""
+    p = resolve_protocol(mode=ProtocolMode.SENSOR_TIME_INDEPENDENT,
+                         training_time_strides=[2], cli_time_stride=2, query_time_stride=1)
+    assert p.sensor_time_stride == 2
+    assert p.dns_time_stride == 1
+    assert p.aligns_sensor_to_dns is False
+    assert "query" in p.basis and "1" in p.basis
+
+
+def test_query_stride_default_leaves_sensor_time_independent_unchanged():
+    a = resolve_protocol(mode=ProtocolMode.SENSOR_TIME_INDEPENDENT,
+                         training_time_strides=[1], cli_time_stride=2)
+    b = resolve_protocol(mode=ProtocolMode.SENSOR_TIME_INDEPENDENT,
+                         training_time_strides=[1], cli_time_stride=2, query_time_stride=None)
+    assert a == b
+
+
+@pytest.mark.parametrize("mode", [ProtocolMode.FOLLOW_TRAINING, ProtocolMode.FIXED_GRID])
+def test_query_stride_rejected_outside_sensor_time_independent(mode):
+    """對齊模式下查詢格點由 sensor 時刻決定；另給一個 query stride 沒有意義，拒收。"""
+    kwargs = {"cli_time_stride": 2, "reason": "x"} if mode is ProtocolMode.FIXED_GRID else {}
+    with pytest.raises(ValueError, match="query_time_stride"):
+        resolve_protocol(mode=mode, training_time_strides=[2], query_time_stride=1, **kwargs)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_query_stride_must_be_positive(bad):
+    with pytest.raises(ValueError):
+        resolve_protocol(mode=ProtocolMode.SENSOR_TIME_INDEPENDENT,
+                         training_time_strides=[2], cli_time_stride=2, query_time_stride=bad)
+
+
 def test_matched_modes_align():
     for mode in (ProtocolMode.FOLLOW_TRAINING, ProtocolMode.FIXED_GRID):
         kwargs = {"cli_time_stride": 2, "reason": "x"} if mode is ProtocolMode.FIXED_GRID else {}

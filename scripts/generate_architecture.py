@@ -1,6 +1,6 @@
 """Generate a deterministic PI-CON DeepONet architecture figure (TMLR / pi-lnn-jax).
 
-What: 產生論文用兩行 DeepONet branch/trunk 架構圖，輸出到 paper/tmlr-format/figures/architecture。
+What: 產生論文用兩行 DeepONet branch/trunk 架構圖，輸出到 paper/pof-format/figures/architecture。
 Why: Image generation 容易新增錯誤箭頭；固定座標與箭頭拓撲可避免
      Branch Basis / Trunk Basis 被誤接到 Field。
 Note: 移植自 pi-lnn (PyTorch) thesis script。liquid-τ 併入 Liquid CfC Memory box
@@ -16,7 +16,7 @@ from matplotlib.path import Path as MplPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT_DIR = ROOT / "paper/tmlr-format" / "figures"
+OUT_DIR = ROOT / "paper/pof-format" / "figures"
 OUT_STEM = OUT_DIR / "architecture"
 
 COLORS = {

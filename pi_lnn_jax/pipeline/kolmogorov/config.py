@@ -55,6 +55,9 @@ class KolmogorovRunConfig:
     log_every: int
     eval_every: int
     multi_re: bool
+    wandb: bool
+    wandb_project: str
+    wandb_weights_every: int
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,9 @@ class KolmogorovCurriculumConfig:
     autoreg_pseudo_dt: float
     autoreg_rounds: int
     grad_accum_chunks: int
+    #: encoder 輸入／監督目標的時間 stride；1/1 = 共用同一序列（見 TRAIN_SCHEMA 註解）
+    encoder_time_stride: int
+    target_time_stride: int
     use_time_marching: bool
     tm_start_frac: float
     tm_warmup_steps: int
@@ -211,6 +217,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--save_every", type=int, default=None,
                    help="覆蓋 TOML checkpoint_period")
     p.add_argument("--log_every", type=int, default=25)
+    p.add_argument("--wandb", action="store_true",
+                   help="啟用 W&B 紀錄（等同 TOML wandb = true；見 pi_lnn_jax/tracking.py）")
     p.add_argument("--multi_re", action="store_true",
                    help="從 TOML data_kwargs.re_values 載入多 Re datasets")
     p.add_argument("--refine_optimizer", choices=["none", "lbfgs", "lm", "gn"], default="none",
@@ -253,6 +261,7 @@ class KolmogorovPolicy:
         "run.artifacts_dir": "artifacts/run", "run.learning_rate": 3e-3,
         "run.max_grad_norm": 1.0, "run.save_every": 100, "run.log_every": 25,
         "run.eval_every": 0, "run.multi_re": False,
+        "run.wandb": False, "run.wandb_project": "pi-con", "run.wandb_weights_every": 500,
         "loss.data_weight": 1.0, "loss.physics_weight": 0.01,
         "loss.poisson_weight": 0.0, "loss.gauge_weight": 0.0,
         "loss.sensor_channel_weights": [], "loss.physics_warmup_steps": 0,
@@ -273,6 +282,7 @@ class KolmogorovPolicy:
         "curriculum.sensor_cut_min_frac": 0.0,
         "curriculum.autoreg_pseudo_dt": 0.0, "curriculum.autoreg_rounds": 1,
         "curriculum.grad_accum_chunks": 1, "curriculum.use_time_marching": False,
+        "curriculum.encoder_time_stride": 1, "curriculum.target_time_stride": 1,
         "curriculum.tm_start_frac": 0.5, "curriculum.tm_warmup_steps": 500,
         "curriculum.tm_ramp_steps": 2500, "curriculum.sensor_dropout_rate": 0.0,
         "curriculum.rar_freq": 0, "curriculum.rar_warmup": 500,
@@ -322,6 +332,8 @@ class KolmogorovPolicy:
             "autoreg_pseudo_dt": "curriculum.autoreg_pseudo_dt",
             "autoreg_rounds": "curriculum.autoreg_rounds",
             "grad_accum_chunks": "curriculum.grad_accum_chunks",
+            "encoder_time_stride": "curriculum.encoder_time_stride",
+            "target_time_stride": "curriculum.target_time_stride",
             "rar_freq": "curriculum.rar_freq", "rar_warmup": "curriculum.rar_warmup",
             "rar_pool_size": "curriculum.rar_pool_size",
             "rar_exploration_ratio": "curriculum.rar_exploration_ratio",
@@ -331,6 +343,8 @@ class KolmogorovPolicy:
             "use_continuous_re_physics": "loss.use_continuous_re_physics",
             "continuous_re_physics_weight": "loss.continuous_re_physics_weight",
             "use_causal_weighting": "loss.use_causal", "causal_eps": "loss.causal_eps",
+            "wandb": "run.wandb", "wandb_project": "run.wandb_project",
+            "wandb_weights_every": "run.wandb_weights_every",
         }
         for key, path in direct_train.items():
             if key in tk:
@@ -410,6 +424,8 @@ class KolmogorovPolicy:
             cli_values["loss.use_causal"] = True
         if cli.multi_re:
             cli_values["run.multi_re"] = True
+        if cli.wandb:
+            cli_values["run.wandb"] = True
         return (
             ConfigurationLayer("schema_default", self._defaults),
             ConfigurationLayer("toml", toml),
@@ -434,6 +450,8 @@ class KolmogorovPolicy:
                 learning_rate=v["run.learning_rate"], max_grad_norm=v["run.max_grad_norm"],
                 save_every=v["run.save_every"], log_every=max(1, v["run.log_every"]),
                 eval_every=max(0, v["run.eval_every"]), multi_re=v["run.multi_re"],
+                wandb=v["run.wandb"], wandb_project=v["run.wandb_project"],
+                wandb_weights_every=v["run.wandb_weights_every"],
             ),
             loss=KolmogorovLossConfig(**{
                 field: v[f"loss.{field}"] for field in KolmogorovLossConfig.__dataclass_fields__

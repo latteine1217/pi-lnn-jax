@@ -56,36 +56,18 @@ import jax
 import jax.numpy as jnp
 
 
-def make_ns_residual_fn(
-    model,
-    sensor_pos: jnp.ndarray | None = None,
-    sensor_time: jnp.ndarray | None = None,
-    norm_stats: dict | None = None,
-    re_value: float | None = None,
-) -> Callable:
+def make_ns_residual_fn(model) -> Callable:
     """Return (ns_residuals, poisson_residual)。
 
-    Wave 5 signature change (multi-Re support):
-      `sensor_pos`、`sensor_time`、`norm_stats`、`re_value` 不再 closure capture，
-      改為 ns_residuals / poisson_residual 的 runtime args：
+    `sensor_pos`、`sensor_time`、`nu` 與正規化常數一律是 ns_residuals /
+    poisson_residual 的 runtime args，不 closure capture：
         ns_residuals(params, h_states, xs, ys, ts, A, k_f,
-                     sensor_pos, sensor_time, nu, u_mean, u_std, v_mean, v_std)
-      這四個過去 closure 的舊參數保留只為 backward-compat（傳了會 warn-ignore），
-      不再影響行為。
+                     sensor_pos, sensor_time, nu, u_mean, u_std, v_mean, v_std, ...)
 
     Why: 舊版把 (nu, u_mean, ...) bake 進 closure，multi-Re 訓練時 dataset 切換
          會 silent 失效（外層改 Python 變數，jit graph 內仍是 d0 的常數）。
          改 runtime arg 後 jit 只 trace 一次，Re 切換零成本。
     """
-    if any(x is not None for x in (sensor_pos, sensor_time, norm_stats, re_value)):
-        import warnings as _w
-        _w.warn(
-            "make_ns_residual_fn() 舊參數 (sensor_pos/sensor_time/norm_stats/re_value) "
-            "已改為 ns_residuals 的 runtime args；傳入值會被忽略。",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
     # 必須 lazy import 避免循環依賴
     from pi_lnn_jax.models import LiquidOperator
 

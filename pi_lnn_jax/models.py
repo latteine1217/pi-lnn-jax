@@ -359,6 +359,30 @@ class CfCStep(nn.Module):
         return new_h, new_h
 
 
+class GRUDtStep(nn.Module):
+    """CfCStep 的離散 recurrent 對照：GRU，Δt 當作一個額外輸入特徵（RNN-Δt，Rubanova 2019）。
+
+    Why：dropout 實驗要分離「CfC 的連續時間閘門」與「任何看得到 Δt 的 recurrent encoder」。
+    兩者介面相同（signature 同 CfCStep）、參數量相當（hidden=256 時 GRU 395,008 vs CfC
+    394,240），差別只在 Δt 如何進入狀態更新：CfC 經 τ⊙Δt 進 gate，這裡是被學習的線性特徵。
+    """
+    hidden_size: int
+    torch_style_init: bool = False
+
+    @nn.compact
+    def __call__(self, h: jnp.ndarray, x_dt: tuple[jnp.ndarray, jnp.ndarray]):
+        x_t, dt_t = x_dt
+        # dt_t 是 scalar（per-step）或 [K]（per-sensor）；一律攤成 x_t 的一個輸入欄。
+        dt_col = jnp.asarray(dt_t, dtype=x_t.dtype)
+        if dt_col.ndim > 0:
+            dt_col = dt_col[..., None]
+        dt_col = jnp.broadcast_to(dt_col, x_t.shape[:-1] + (1,))
+        kinit = torch_linear_kernel_init if self.torch_style_init else nn.linear.default_kernel_init
+        new_h, _ = nn.GRUCell(features=self.hidden_size, kernel_init=kinit, name='gru')(
+            h, jnp.concatenate([x_t, dt_col], axis=-1))
+        return new_h, new_h
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Building blocks
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,6 +636,8 @@ class TemporalCfCEncoder(nn.Module):
     cfc_input_dependent_tau: bool = False
     cfc_tau_mod_scale: float = 2.0
     torch_style_init: bool = False
+    # 遞迴 cell："cfc"（預設，PI-CON）或 "gru_dt"（GRUDtStep 對照臂；cfc_* 欄位對它不作用）
+    temporal_cell: str = "cfc"
 
     @property
     def _kinit(self):
@@ -645,10 +671,21 @@ class TemporalCfCEncoder(nn.Module):
             )
             for i in range(max(self.num_token_attention_layers, 0))
         ]
-        # nn.scan: CfCStep 對時間軸 scan，params 跨 timestep broadcast（共享）
+        # nn.scan: cell 對時間軸 scan，params 跨 timestep broadcast（共享）
         # Forward scan
-        ScannedCfCFwd = nn.scan(
-            CfCStep,
+        if self.temporal_cell == "cfc":
+            step_cls, step_kwargs = CfCStep, dict(
+                log_tau_min=self.cfc_log_tau_min,
+                log_tau_max=self.cfc_log_tau_max,
+                input_dependent_tau=self.cfc_input_dependent_tau,
+                tau_mod_scale=self.cfc_tau_mod_scale,
+            )
+        elif self.temporal_cell == "gru_dt":
+            step_cls, step_kwargs = GRUDtStep, {}
+        else:
+            raise ValueError(f"temporal_cell 必須是 'cfc' 或 'gru_dt'，收到 {self.temporal_cell!r}")
+        ScannedCellFwd = nn.scan(
+            step_cls,
             variable_broadcast='params',
             split_rngs={'params': False},
             in_axes=0,
@@ -656,14 +693,11 @@ class TemporalCfCEncoder(nn.Module):
             reverse=False,
         )
         self.cells = [
-            ScannedCfCFwd(
+            ScannedCellFwd(
                 hidden_size=self.d_model,
-                log_tau_min=self.cfc_log_tau_min,
-                log_tau_max=self.cfc_log_tau_max,
-                input_dependent_tau=self.cfc_input_dependent_tau,
-                tau_mod_scale=self.cfc_tau_mod_scale,
                 torch_style_init=self.torch_style_init,
                 name=f'cell_{i}',
+                **step_kwargs,
             )
             for i in range(self.num_layers)
         ]
@@ -1214,6 +1248,8 @@ class LiquidOperator(nn.Module):
     # （config.py:114 一帶），打開 tau 而留著 2.0 等於預設踩進去。
     cfc_input_dependent_tau: bool = True
     cfc_tau_mod_scale: float = 0.5
+    # 見 TemporalCfCEncoder 同名欄位；"gru_dt" 是 CfC 獨立貢獻的對照臂
+    temporal_cell: str = "cfc"
     use_modified_mlp: bool = False
     use_locality_decay: bool = False
     disable_cross_attention: bool = False
@@ -1285,6 +1321,7 @@ class LiquidOperator(nn.Module):
             cfc_input_dependent_tau=self.cfc_input_dependent_tau,
             cfc_tau_mod_scale=self.cfc_tau_mod_scale,
             torch_style_init=self.torch_style_init,
+            temporal_cell=self.temporal_cell,
         )
         # decoder class：若啟 use_decoder_remat，套 nn.remat lifted transform
         # 對二階 autograd 用 forward-recompute 換 activation memory（peak ↓ 30-40%）

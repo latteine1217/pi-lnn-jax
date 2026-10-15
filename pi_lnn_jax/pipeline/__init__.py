@@ -91,27 +91,4 @@
   要對拍請用 `scripts/slurm/verify_*_cpu_ab.sbatch.tmpl`——它比的是 ledger、
   params/opt digest 與評估產物，本來就不看行序。
 ═══════════════════════════════════════════════════════════════════════════
-
-本檔頂層 re-export 的六個名字是 **Kolmogorov 的**（wave 1 只有一案時留下的相容別名）。
-名字同形會撞，故 repo 內一律走 case-qualified 路徑；cylinder 只能從
-`pi_lnn_jax.pipeline.cylinder` 匯入，這裡不提供、也不會提供 cylinder 的同名別名。
 """
-from __future__ import annotations
-
-from pi_lnn_jax.pipeline.kolmogorov import (
-    KolmogorovEffectiveConfig,
-    TrainResult,
-    TrainingContext,
-    build_context,
-    resolve_inputs,
-    run_training,
-)
-
-__all__ = [
-    "KolmogorovEffectiveConfig",
-    "TrainResult",
-    "TrainingContext",
-    "build_context",
-    "resolve_inputs",
-    "run_training",
-]

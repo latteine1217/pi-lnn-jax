@@ -131,6 +131,9 @@ def model_fingerprint(model: Any) -> dict[str, Any]:
         fp.pop("relpos_bias_norm", None)
     if not getattr(model, "relpos_bias_zero_init", False):
         fp.pop("relpos_bias_zero_init", None)
+    # 同理，時間 cell 為預設 "cfc" 時省略：forward 與「從未有此欄位」逐位元相同。
+    if getattr(model, "temporal_cell", "cfc") == "cfc":
+        fp.pop("temporal_cell", None)
     return fp
 
 

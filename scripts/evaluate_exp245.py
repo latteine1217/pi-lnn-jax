@@ -45,6 +45,7 @@ from pi_lnn_jax.data import load_sensors_from_path  # noqa: E402
 from pi_lnn_jax.evaluate import evaluate_time_series  # noqa: E402
 from pi_lnn_jax.evaluation_protocol import (  # noqa: E402
     ProtocolMode,
+    encoder_time_stride_from_config,
     load_for_evaluation,
     resolve_protocol,
     training_time_strides_from_config,
@@ -59,6 +60,7 @@ from pi_lnn_jax.metric_artifact import (  # noqa: E402
     write_compatibility_projection,
     write_metric_artifact,
 )
+from pi_lnn_jax import tracking  # noqa: E402
 from pi_lnn_jax.model_factory import build_model  # noqa: E402
 from pi_lnn_jax.sensor_dropout import apply_sensor_dropout, make_keep_mask  # noqa: E402
 
@@ -111,6 +113,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--protocol-reason", default=None, help="fixed_grid 必填")
     p.add_argument("--time-stride", type=int, default=None,
                    help="sensor 與 DNS 載入時的 time stride（與 train_kolmogorov.py 一致）")
+    p.add_argument("--query-time-stride", type=int, default=None,
+                   help="僅 sensor_time_independent：查詢格點（DNS）另用的 stride，預設同 "
+                        "--time-stride。用來在兩個 sensor 幀之間評估——情境照訓練的 stride "
+                        "載入，norm_stats 才與訓練逐位元相同。")
     p.add_argument("--no-plot", action="store_true",
                    help="跳過 matplotlib spectrum plot（無 X 環境 / headless 用）")
     # 論文繪圖用的匯出（預設關閉：兩者都只有畫圖時才需要，訓練評估流程不該付這個代價）
@@ -141,6 +147,9 @@ def parse_args() -> argparse.Namespace:
                    help="每個 dropout rate 的隨機 mask realization 數（跨 realization 報 mean±std）")
     p.add_argument("--dropout_seed", type=int, default=0,
                    help="dropout mask 的 base PRNGKey（realization r 用 seed+r，可重現）")
+    p.add_argument("--wandb", choices=["off", "on", "follow"], default="off",
+                   help="把本次評估接回訓練的 W&B run（eval/ 區塊）。on=訓練端沒開 W&B 就報錯；"
+                        "follow=訓練端有開才接回（sbatch template 用這個，決定會印出來）")
     return p.parse_args()
 
 
@@ -181,6 +190,13 @@ def main() -> int:
     ckpt_dir = artifacts_dir / "checkpoints"
     out_dir = artifacts_dir / args.output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
+    use_wandb = args.wandb == "on"
+    if args.wandb == "on":
+        tracking.training_run_file(artifacts_dir)   # 先確認接得回去，別等評估算完才失敗
+    elif args.wandb == "follow":
+        use_wandb = tracking.has_training_run(artifacts_dir)
+        print(f"[wandb] follow：訓練端{'有' if use_wandb else '沒有'} W&B run → "
+              f"{'接回 eval/' if use_wandb else '不記錄'}")
 
     print("=" * 80)
     print(f"evaluate_exp245 — config={Path(args.config).name}")
@@ -217,7 +233,8 @@ def main() -> int:
     protocol = resolve_protocol(
         mode=args.protocol,
         training_time_strides=training_time_strides_from_config(args.config),
-        cli_time_stride=args.time_stride, reason=args.protocol_reason)
+        cli_time_stride=args.time_stride, reason=args.protocol_reason,
+        query_time_stride=args.query_time_stride)
     print(f"[protocol] {protocol.mode.value}  sensor_stride={protocol.sensor_time_stride} "
           f"dns_stride={protocol.dns_time_stride}  {protocol.basis}")
 
@@ -235,6 +252,25 @@ def main() -> int:
     T, K = sensor_vals.shape[0], sensor_vals.shape[1]
     print(f"[data] sensor_vals {sensor_vals.shape}  T={T}  K={K}")
     dns_u, dns_v, dns_t = aligned.dns_u_eval, aligned.dns_v_eval, aligned.dns_t_eval
+    # encoder／監督 stride 拆開的消融臂：模型必須看到**訓練時 encoder 看到的**情境，
+    # 而不是整條已載入的序列。只切情境、不切評估時刻（dns_t）——評估幀數與情境長度
+    # 無關（evaluate_time_series 走 dns_u.shape[0]），事後可在任一子集上評分。
+    # 放在 T 之後：T_eval 維持「實際評估的幀數」這個意思。norm_stats 取自整條已載入
+    # 序列，與訓練端一致（訓練端也是先正規化、再切）。預設 1 時整段不執行。
+    enc_stride = encoder_time_stride_from_config(args.config)
+    if enc_stride != 1:
+        if protocol.mode is not ProtocolMode.FOLLOW_TRAINING:
+            raise SystemExit(
+                f"encoder_time_stride={enc_stride} 只支援 --protocol follow_training"
+                f"（收到 {protocol.mode.value}）：其餘協定會另外改動情境的時間軸")
+        if args.autoreg_pseudo_dt > 0.0 or float(args.sensor_dropout_rate) > 0.0:
+            raise SystemExit(
+                f"encoder_time_stride={enc_stride} 不得與 --autoreg_pseudo_dt／"
+                "--sensor_dropout_rate 同時使用：訓練端已拒收同一組合")
+        sensor_vals = sensor_vals[::enc_stride]
+        sensor_time = sensor_time[::enc_stride]
+        print(f"[encoder] 情境取 stride {enc_stride}：{sensor_vals.shape[0]} 幀"
+              f"（評估時刻仍為 {dns_t.shape[0]} 個）")
     dns_p = aligned.dns_p_eval
     if protocol.mode is ProtocolMode.SENSOR_TIME_INDEPENDENT:
         print(f"[eval] sensor-time-independent：query 走 DNS {dns_t.shape[0]} 幀格點，"
@@ -418,6 +454,8 @@ def main() -> int:
                 "re_value": re_value,
             "evaluation_protocol": protocol.to_provenance(),
                 "sensor_dropout": dropout_summary,
+                # 只在 ≠1 時寫：預設評估的產物因此逐位元不變。缺這個鍵 = encoder 吃整條序列。
+                **({"encoder_time_stride": enc_stride} if enc_stride != 1 else {}),
             }),
         ),
     )
@@ -516,6 +554,22 @@ def main() -> int:
                 print(f"[out] pressure_field.png → {p_plot_path}")
         except Exception as e:
             print(f"[WARN] plot 失敗 ({type(e).__name__}: {e})；可加 --no-plot 跳過")
+
+    # ── W&B：寫完產物之後才做，失敗不影響 metrics.json ──
+    if use_wandb:
+        tracker = tracking.attach_eval(artifacts_dir)
+        try:
+            tracker.log_eval(
+                metrics={k: metrics_mean[k] for k in tracking.KOLMOGOROV_EVAL_KEYS},
+                per_t={"t": [r["t"] for r in metrics_per_t],
+                       **{k: [r[k] for r in metrics_per_t] for k in tracking.KOLMOGOROV_EVAL_KEYS}},
+                x="t", curves=tracking.KOLMOGOROV_EVAL_CURVES,
+            )
+            tracker.summary({"eval/ckpt_step": restored_step})
+            tracker.save_file(summary_path)
+        finally:
+            tracking.finish()
+        print(f"[out] W&B eval/ → run in {artifacts_dir / 'wandb'}")
 
     # ── 最終 summary print ──
     print("\n" + "=" * 80)

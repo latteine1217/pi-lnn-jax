@@ -25,6 +25,7 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH" >&2; exit 2; }
 export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 [ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在" >&2; exit 3; }
 
 export JAX_PLATFORMS=cuda

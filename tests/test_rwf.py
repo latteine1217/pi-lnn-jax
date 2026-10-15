@@ -150,7 +150,7 @@ def test_rwf_config_schema():
 
     # 2026-08-29 起預設為 True：n=5 判別顯示 rwf on 在主指標上顯著較好
     # （-0.114 pp, t=-3.92，五 seed 範圍不重疊；見 knowledge/experiments/
-    # kolmogorov-rwf-multiseed-2026-08-29.md）。舊的 False 出自單 seed 與
+    # history-through-2026-09-14.md#e06）。舊的 False 出自單 seed 與
     # 錯誤 eval stride（TD-4）疊加的「rwf 有害」判定，該判定已推翻。
     assert MODEL_SCHEMA["use_rwf"][1] is True
     assert MODEL_SCHEMA["rwf_mean"][1] == 1.0

@@ -23,7 +23,9 @@
 | `compare_baselines.py` | 四方對照合成（PI-CON/gappy/SHRED/interp） |
 | `aggregate_pv_campaign.py` | placement-variance campaign 聚合（σ_training/σ_placement） |
 | `cost_accuracy.py` | Tier 0.2 cost-vs-accuracy 曲線（sbatch: `slurm/eval_cost_accuracy.sbatch.tmpl`） |
-| `classical_baselines_fair.py` | tab:fair 的 trig-LSQ/RBF/IDW baselines（sbatch: `slurm/eval_tabfair.sbatch.tmpl`） |
+| `classical_baselines_fair.py` | tab:fair 的 trig-LSQ/RBF/IDW baselines（sbatch: `slurm/eval_tabfair.sbatch.tmpl`）；`--extended` 另加圓盤 LSQ／週期 RBF／週期 IDW，超參數由 leave-sensors-out CV 選定（不讀 DNS） |
+| `eval_pressure_limit.py` | 附錄壓力表：模型 p vs 由 DNS (u,v) 解 Poisson 的參考壓力（**不讀 DNS 的 `p`**，其符號錯誤），附 uv 指紋閘門（sbatch: `slurm/eval_pressure_limit.sbatch.tmpl`，以 `slurm/render_eval_pressure_limit.sh` 展開 run 清單） |
+| `aggregate_pressure_limit.py` | 上者輸出依 arm 聚合（mean ± sd，ddof=1） |
 
 ## 訓練（baseline）
 
@@ -40,6 +42,8 @@
 | `diag_subspace_transfer.py` | 跨-Re 子空間轉移診斷 |
 | `diag_offgrid_query.py` | 在 sensor 時戳**之間**查詢，量「continuous-time」宣稱的代價（三個評估協定都做不到 off-grid，見該檔 docstring） |
 | `diag_spatial_emb_bandwidth.py` | 訓練後 `LearnableFourierEmb` 的可達諧波階（Jacobi–Anger）；量 trunk 基底頻寬是否涵蓋 k≥16。⚠️ 不要用它做「感測極限 vs 架構」的二分歸因——該問法已於 2026-09-01 撤回（見 `knowledge/research/negative-results.md`） |
+| `diag_pressure_poisson_jump.py` | 同一次重建量兩件事：網路 p vs 由**網路自己的速度**解 Poisson 的 p，以及狀態切換跳躍（t_i−ε vs t_i）。重用 `eval_pressure_limit` 的 restore 與 uv 指紋閘門（PoF 審稿，2026-10-06） |
+| `diag_spectral_floor.py` | 重建能譜高波數平台的來源判別：fp32 vs fp64（`JAX_ENABLE_X64`）× 256² vs 512² 查詢格點。結論見 `knowledge/experiments/kolmogorov-pof-review-evals-2026-10-06.md` |
 | `run_cp_analysis.py` | conformal prediction 分析（§6.6 / Appendix E） |
 | `dump_cp_fields.py` | CP 場 dump |
 | `bench_folx.py` | folx AD benchmark |
@@ -58,6 +62,7 @@
 | `gen_sensors_boundary.py` | cylinder boundary-biased placement |
 | `gen_sensors_sdf_isocontour.py` | cylinder SDF 等值線 placement |
 | `gen_sensors_re10000_T20.py` | Re=10⁴ 主 case sensor 集 |
+| `gen_sensors_qrpivot_dns.py` | DNS-pivot oracle placement：對 DNS 快照的 u、v、p_ref、ω、\|∇u\|、\|∇v\| 做 QRCP，各預算巢狀；軸向由散度檢查驗證（`tests/test_gen_sensors_qrpivot_dns.py`） |
 
 上列前三支**不再跨 repo**：pi-lnn 依賴已於 2026-08-21（`bf08ff2`）消除，QR-pivot 的
 cylinder 實作已移植為 `_common/qrpivot_cylinder.py`，在本 repo env 直接執行即可
@@ -65,11 +70,15 @@ cylinder 實作已移植為 `_common/qrpivot_cylinder.py`，在本 repo env 直�
 [`CLAUDE.md`](CLAUDE.md) §4。共用件在 `_common/cylinder_sensors.py` 與
 `_common/qrpivot_cylinder.py`。
 
+Kolmogorov 主線 LES-derived QR-pivot 佈點的生成器（`generate_sensors_qrpivot_from_les.py`）仍只在
+lab-server 的 pi-lnn，未移植。它的 "omega" 特徵實際是 ∂v/∂y − ∂u/∂x（陣列慣例 `[T, x, y]` 下取錯軸），
+已入庫的 LES-QR 檔由它逐點重現得出；thesis ch02 照實描述。
+
 ## 繪圖（論文 figures）
 
 `plot_ksweep.py`、`plot_energy_spectrum.py`、`plot_observability_figures.py`、
 `plot_placement_kappa_mi.py`、`plot_nyquist_recoverability.py`、
-`plot_forward_cfd_anisotropy.py`、`plot_exp_snap_drop.py` 走 `journal_style.py`。
+`plot_forward_cfd_anisotropy.py`、`plot_forward_cfd_spectrum.py`、`plot_exp_snap_drop.py` 走 `journal_style.py`。
 
 same-IC LES 那三支（2026-09-17 補寫，收投稿前稽核的 `A2-M05`／`A2-M06`／`A2-N06`；
 重建配方見 [`docs/paper-figure-provenance.md`](../docs/paper-figure-provenance.md) §3.2）：
@@ -86,6 +95,8 @@ same-IC LES 那三支（2026-09-17 補寫，收投稿前稽核的 `A2-M05`／`A2
 只有腳本需要、不屬於 `pi_lnn_jax` 函式庫的共用件：
 
 - `cylinder_sensors.py` — cylinder placement 幾何推導 + sensor set 輸出 schema。
+- `periodic_fields.py` — 週期方形域的壓力（由速度解 Poisson）與二階中央差分梯度，陣列 `[..., x, y]`；
+  壓力評估（`eval_pressure_limit.py`）與 oracle 佈點（`gen_sensors_qrpivot_dns.py`）共用同一份定義。
 - `sameic_les_dns.py` — same-IC LES／DNS 場對的載入與前提檢查（時間軸逐點相同、
   網格同形、`t=0` 的場一致）。**只檢查不修正**：兩支求解器的速度號約定相反時要修
   生成端，在繪圖端自動翻號會把「讀錯檔」也一起修掉。

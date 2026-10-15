@@ -22,6 +22,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from journal_style import setup_style, figwidth, save_figure, DNS, PICON, DNS_LS, PICON_LS  # noqa: E402
+from _common.units import unit
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -30,8 +31,8 @@ from pi_lnn_jax.data import load_dns_from_path  # noqa: E402
 from pi_lnn_jax.metric_artifact import compute_vorticity  # noqa: E402
 
 
-def _style_field_ax(ax, with_labels: bool = True) -> None:
-    """場 panel：四邊框標示域邊界、無格線、SI 單位軸標。"""
+def _style_field_ax(ax, with_labels: bool = True, nondim: bool = False) -> None:
+    """場 panel：四邊框標示域邊界、無格線、SI 單位軸標（nondim 時不標單位）。"""
     for side in ("top", "right", "bottom", "left"):
         ax.spines[side].set_visible(True)
         ax.spines[side].set_linewidth(0.6)
@@ -40,8 +41,8 @@ def _style_field_ax(ax, with_labels: bool = True) -> None:
     ax.set_yticks([0.0, 0.5, 1.0])
     ax.tick_params(labelsize=7)
     if with_labels:
-        ax.set_xlabel(r"$x$ (m)", fontsize=8, labelpad=2)
-        ax.set_ylabel(r"$y$ (m)", fontsize=8, labelpad=2)
+        ax.set_xlabel(r"$x$" + unit("m", nondim), fontsize=8, labelpad=2)
+        ax.set_ylabel(r"$y$" + unit("m", nondim), fontsize=8, labelpad=2)
 
 
 def _imshow(ax, f, vmin=None, vmax=None, cmap="RdBu_r"):
@@ -55,9 +56,9 @@ def _sym(*arrs) -> float:
 
 
 def fig_field_comparison(u_p, v_p, u_d, v_d, w_p, w_d, out: Path,
-                         venue: str = "thesis") -> None:
-    rows = [(r"$u$ [m/s]", u_d, u_p), (r"$v$ [m/s]", v_d, v_p),
-            (r"$\omega$ [1/s]", w_d, w_p)]
+                         venue: str = "thesis", nondim: bool = False) -> None:
+    rows = [(r"$u$" + unit("m/s", nondim), u_d, u_p), (r"$v$" + unit("m/s", nondim), v_d, v_p),
+            (r"$\omega$" + unit("1/s", nondim), w_d, w_p)]
     # aspect=equal 的 3x3 場陣列：高度由 panel 寬度決定，給太高只會產生列間空白
     fig, axes = plt.subplots(3, 3, figsize=(figwidth(venue, "single"), 5.0),
                              constrained_layout=True)
@@ -72,7 +73,7 @@ def fig_field_comparison(u_p, v_p, u_d, v_d, w_p, w_d, out: Path,
             # 左欄的量名由 row label 表達，故不再重複 ylabel（兩者會疊在一起）
             _style_field_ax(ax, with_labels=False)
             if r == 2:
-                ax.set_xlabel(r"$x$ (m)", fontsize=8, labelpad=2)
+                ax.set_xlabel(r"$x$" + unit("m", nondim), fontsize=8, labelpad=2)
             if r == 0:
                 ax.set_title(title, fontsize=8, pad=3)
             if c == 0:
@@ -82,7 +83,7 @@ def fig_field_comparison(u_p, v_p, u_d, v_d, w_p, w_d, out: Path,
     plt.close(fig)
 
 
-def fig_vorticity(w_p, w_d, out: Path, venue: str = "thesis") -> None:
+def fig_vorticity(w_p, w_d, out: Path, venue: str = "thesis", nondim: bool = False) -> None:
     lim = _sym(w_d, w_p)
     err = w_p - w_d
     elim = _sym(err)
@@ -92,7 +93,7 @@ def fig_vorticity(w_p, w_d, out: Path, venue: str = "thesis") -> None:
             ("PI-CON", w_p, dict(vmin=-lim, vmax=lim)),
             ("signed error", err, dict(vmin=-elim, vmax=elim))]):
         im = _imshow(ax, f, **kw)
-        _style_field_ax(ax, with_labels=(title == "DNS"))
+        _style_field_ax(ax, with_labels=(title == "DNS"), nondim=nondim)
         ax.set_title(title, fontsize=8, pad=3)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03).ax.tick_params(labelsize=6)
     fig.tight_layout()
@@ -101,7 +102,7 @@ def fig_vorticity(w_p, w_d, out: Path, venue: str = "thesis") -> None:
 
 
 def fig_mean_profile(u_p, v_p, u_d, v_d, y, out: Path,
-                     venue: str = "thesis") -> None:
+                     venue: str = "thesis", nondim: bool = False) -> None:
     """x-與-t 平均剖面與 Reynolds 應力；輸入為 [T,Nx,Ny]（已切到平均窗）。
 
     thesis caption 宣告的是 post-spin-up 窗 t∈[1,5] 的時間平均，不是 t=5
@@ -113,8 +114,8 @@ def fig_mean_profile(u_p, v_p, u_d, v_d, y, out: Path,
     ax = axes[0]
     ax.plot(u_d.mean(axis=(0, 1)), y, color=DNS, ls=DNS_LS, label="DNS")
     ax.plot(u_p.mean(axis=(0, 1)), y, color=PICON, ls=PICON_LS, label="PI-CON")
-    ax.set_xlabel(r"$\langle u\rangle_{x,t}$ (m/s)")
-    ax.set_ylabel(r"$y$ (m)")
+    ax.set_xlabel(r"$\langle u\rangle_{x,t}$" + unit("m/s", nondim))
+    ax.set_ylabel(r"$y$" + unit("m", nondim))
     ax.legend(loc="upper right")
     ax.text(0.02, 1.02, "(a)", transform=ax.transAxes, fontweight="bold")
 
@@ -124,8 +125,8 @@ def fig_mean_profile(u_p, v_p, u_d, v_d, y, out: Path,
         up = f_u - f_u.mean(axis=1, keepdims=True)
         vp = f_v - f_v.mean(axis=1, keepdims=True)
         ax.plot((up * vp).mean(axis=(0, 1)), y, color=colour, ls=ls, label=lab)
-    ax.set_xlabel(r"$\langle u'v'\rangle_{x,t}$ (m$^2$/s$^2$)")
-    ax.set_ylabel(r"$y$ (m)")
+    ax.set_xlabel(r"$\langle u'v'\rangle_{x,t}$" + unit("m$^2$/s$^2$", nondim))
+    ax.set_ylabel(r"$y$" + unit("m", nondim))
     ax.legend(loc="upper right")
     ax.text(0.02, 1.02, "(b)", transform=ax.transAxes, fontweight="bold")
     fig.tight_layout()
@@ -162,8 +163,8 @@ def _t_1e(r, dt):
 
 
 def fig_temporal(u_pred, dns_u, t, out: Path, les_probe=None,
-                 venue: str = "thesis") -> None:
-    r"""(a) 域中心探針軌跡；(b) 空間平均的時間自相關 $R_{uu}(\tau)$。
+                 venue: str = "thesis", nondim: bool = False) -> None:
+    r"""(a) 域中心探針軌跡；(b) 空間平均的時間自相關 $\rho_{uu}(\delta t)$。
 
     (b) 在 post-spin-up 窗 $t\ge1$ s 上計算，與本章其餘時間診斷同窗；
     先逐點算時間自相關再對格點平均，所以它是場的統計量、不是單點實現。
@@ -178,8 +179,8 @@ def fig_temporal(u_pred, dns_u, t, out: Path, les_probe=None,
     if les_probe is not None:
         lt, lu = les_probe
         ax.plot(lt, lu, color="0.45", ls=":", lw=1.1, label="forward LES")
-    ax.set_xlabel(r"$t$ (s)")
-    ax.set_ylabel(r"$u(\mathbf{x}_0,t)$ (m/s)")
+    ax.set_xlabel(r"$t$" + unit("s", nondim))
+    ax.set_ylabel(r"$u(\mathbf{x}_0,t)$" + unit("m/s", nondim))
     ax.legend(loc="upper right", fontsize="x-small")
     ax.text(0.02, 1.02, "(a)", transform=ax.transAxes, fontweight="bold")
 
@@ -197,8 +198,8 @@ def fig_temporal(u_pred, dns_u, t, out: Path, les_probe=None,
     ax.axhline(1.0 / np.e, color="0.5", ls=":", lw=0.8)
     ax.text(0.98, 1.0 / np.e, r"$1/e$", transform=ax.get_yaxis_transform(),
             ha="right", va="bottom", fontsize="x-small", color="0.4")
-    ax.set_xlabel(r"$\tau$ (s)")
-    ax.set_ylabel(r"$R_{uu}(\tau)$")
+    ax.set_xlabel(r"$\delta t$" + unit("s", nondim))
+    ax.set_ylabel(r"$\rho_{uu}(\delta t)$")
     ax.legend(loc="upper right", fontsize="x-small")
     ax.text(0.02, 1.02, "(b)", transform=ax.transAxes, fontweight="bold")
     fig.tight_layout()
@@ -220,6 +221,10 @@ def main() -> int:
                         "的中心點時序；不給則 (a) 面板不畫該曲線。")
     p.add_argument("--venue", default="thesis",
                    help="journal_style venue：決定字體、圖寬與框線樣式（thesis / tmlr）")
+    p.add_argument("--only", choices=["temporal"], default=None,
+                   help="只產 temporal_consistency，不覆寫同目錄其餘三張圖；不給則四張全產")
+    p.add_argument("--nondim", action="store_true",
+                   help="軸標籤不標 SI 單位（PoF 稿）；預設標 SI（thesis）")
     args = p.parse_args()
 
     fp = Path(args.fields)
@@ -253,19 +258,26 @@ def main() -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    if args.only == "temporal":
+        fig_temporal(u_pred, dns_u, t, out, les_probe=les_probe, venue=args.venue,
+                     nondim=args.nondim)
+        return 0
+
     i5 = int(np.argmin(np.abs(t - 5.0)))
     u_p, v_p, u_d, v_d = u_pred[i5], v_pred[i5], dns_u[i5], dns_v[i5]
     w_p = compute_vorticity(u_p, v_p)
     w_d = compute_vorticity(u_d, v_d)
     print(f"[data] t={float(t[i5]):.2f}s (index {i5}/{t.size - 1})")
 
-    fig_field_comparison(u_p, v_p, u_d, v_d, w_p, w_d, out, venue=args.venue)
-    fig_vorticity(w_p, w_d, out, venue=args.venue)
+    fig_field_comparison(u_p, v_p, u_d, v_d, w_p, w_d, out, venue=args.venue,
+                         nondim=args.nondim)
+    fig_vorticity(w_p, w_d, out, venue=args.venue, nondim=args.nondim)
     # mean profile 用 post-spin-up 窗 t∈[1,5]（caption 宣告值），非 t=5 瞬時
     win = t >= 1.0
     fig_mean_profile(u_pred[win], v_pred[win], dns_u[win], dns_v[win], y, out,
-                     venue=args.venue)
-    fig_temporal(u_pred, dns_u, t, out, les_probe=les_probe, venue=args.venue)
+                     venue=args.venue, nondim=args.nondim)
+    fig_temporal(u_pred, dns_u, t, out, les_probe=les_probe, venue=args.venue,
+                 nondim=args.nondim)
     return 0
 
 

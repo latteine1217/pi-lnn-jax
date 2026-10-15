@@ -36,6 +36,7 @@ from journal_style import (  # noqa: E402
     setup_style, figwidth, save_figure, DNS, PICON, DNS_LS, PICON_LS, MUTED,
     STYLE_CYCLE, K_COLORS,
 )
+from _common.units import unit
 
 import numpy as np  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -119,7 +120,8 @@ def _envelope(ax, t, curves, colour, ls, label):
     ax.plot(t, m, color=colour, ls=ls, label=label)
 
 
-def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis") -> None:
+def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis",
+                          nondim: bool = False) -> None:
     t = data[0]["t"]
     fig, axes = plt.subplots(3, 1, sharex=True,
                              figsize=(figwidth(venue, "single"), 6.2))
@@ -127,8 +129,8 @@ def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis") ->
     ax = axes[0]
     ax.plot(t, data[0]["ke_dns"], color=DNS, ls=DNS_LS, label="DNS")
     _envelope(ax, t, [d["ke_pred"] for d in data], PICON, PICON_LS, "PI-CON")
-    ax.set_ylabel(r"$\mathrm{KE}(t)$ (m$^2$/s$^2$)")
-    ax.legend(loc="lower right")
+    ax.set_ylabel(r"$\mathrm{KE}(t)$" + unit("m$^2$/s$^2$", nondim))
+    ax.legend(loc="upper right")  # 右下角會壓到窗尾的 KE 曲線
     ax.text(0.01, 1.02, "(a)", transform=ax.transAxes, fontweight="bold")
 
     ax = axes[1]
@@ -139,7 +141,8 @@ def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis") ->
     ax.plot(t, floor, color=DNS, ls=":", label="DNS finite-difference floor")
     ax.set_yscale("log")
     ax.set_ylabel(r"$\Vert\nabla\!\cdot\!\mathbf{u}\Vert_2 / \Vert\nabla\mathbf{u}\Vert_F^{\rm DNS}$ (%)")
-    ax.legend(loc="upper right")
+    # 右下角在 t>3 時低於 DNS 底線、是空的；右上角會壓到 PI-CON 曲線與窗尾尖峰。
+    ax.legend(loc="lower right", ncol=2)
     ax.text(0.01, 1.02, "(b)", transform=ax.transAxes, fontweight="bold")
 
     ax = axes[2]
@@ -147,7 +150,7 @@ def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis") ->
         colour, _, ls = STYLE_CYCLE[i]
         _envelope(ax, t, [100 * d[key] for d in data], colour, ls, lab)
     ax.set_ylabel(r"relative $L_2$ error (%)")
-    ax.set_xlabel(r"$t$ (s)")
+    ax.set_xlabel(r"$t$" + unit("s", nondim))
     ax.legend(loc="upper right")
     ax.text(0.01, 1.02, "(c)", transform=ax.transAxes, fontweight="bold")
 
@@ -161,7 +164,8 @@ def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis") ->
 BAND_CONVENTION = "k_eta-fraction shell-wise: (0,0.1k_eta] / (0.1,0.4] / (0.4,1.0]"
 
 
-def fig_band_energy(data: list[dict], out: Path, venue: str = "thesis") -> None:
+def fig_band_energy(data: list[dict], out: Path, venue: str = "thesis",
+                    nondim: bool = False) -> None:
     print(f"[band] convention = {BAND_CONVENTION}"
           "  (NOT the fixed integer bands k<=5 / 5<k<=16 / k>16)")
     # t=0 的高波段能量近零，相對誤差在該幀發散（正文同樣把它排除在統計之外）。
@@ -177,9 +181,10 @@ def fig_band_energy(data: list[dict], out: Path, venue: str = "thesis") -> None:
         colour, _, ls = STYLE_CYCLE[i]
         _envelope(ax, t, [100 * np.asarray(d[key])[1:] for d in data], colour, ls, lab)
     ax.set_yscale("log")
-    ax.set_xlabel(r"$t$ (s)")
+    ax.set_xlabel(r"$t$" + unit("s", nondim))
     ax.set_ylabel(r"band energy relative error (%)")
-    ax.legend(loc="upper right")
+    # 放在軸外：high band 貼著 100% 跑，軸內右上角的圖例會壓在它上面。
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3)
     fig.tight_layout()
     print(f"[out] {[str(p) for p in save_figure(fig, str(out / 'band_energy_rel_error_vs_time'))]}")
     plt.close(fig)
@@ -190,7 +195,8 @@ def _wrap(a: np.ndarray) -> np.ndarray:
     return (a + np.pi) % (2 * np.pi) - np.pi
 
 
-def fig_kf_mode(data: list[dict], out: Path, venue: str = "thesis") -> None:
+def fig_kf_mode(data: list[dict], out: Path, venue: str = "thesis",
+                nondim: bool = False) -> None:
     need = ("kf_mode_amp_pred", "kf_mode_amp_dns",
             "kf_mode_phase_pred", "kf_mode_phase_dns")
     missing = [k for k in need if k not in data[0]]
@@ -206,7 +212,7 @@ def fig_kf_mode(data: list[dict], out: Path, venue: str = "thesis") -> None:
     ratio = [d["kf_mode_amp_pred"] / (d["kf_mode_amp_dns"] + 1e-12) for d in data]
     _envelope(ax, t, ratio, PICON, PICON_LS, "PI-CON / DNS")
     ax.axhline(1.0, color=DNS, ls=DNS_LS, lw=0.8)
-    ax.set_ylabel(r"$|\hat{u}_{k_f}|_{\rm pred} / |\hat{u}_{k_f}|_{\rm DNS}$")
+    ax.set_ylabel(r"$|\hat{u}_{k_f}^{\rm pred}| / |\hat{u}_{k_f}^{\rm DNS}|$ (–)")
     ax.legend(loc="lower right")
     ax.text(0.01, 1.02, "(a)", transform=ax.transAxes, fontweight="bold")
 
@@ -214,8 +220,8 @@ def fig_kf_mode(data: list[dict], out: Path, venue: str = "thesis") -> None:
     dphi = [_wrap(d["kf_mode_phase_pred"] - d["kf_mode_phase_dns"]) for d in data]
     _envelope(ax, t, dphi, PICON, PICON_LS, "phase error")
     ax.axhline(0.0, color=DNS, ls=DNS_LS, lw=0.8)
-    ax.set_ylabel(r"$\arg\hat{u}_{\rm pred} - \arg\hat{u}_{\rm DNS}$ (rad)")
-    ax.set_xlabel(r"$t$ (s)")
+    ax.set_ylabel(r"Circular phase error $\Delta\varphi$ (rad)")
+    ax.set_xlabel(r"$t$" + unit("s", nondim))
     ax.legend(loc="upper right")
     ax.text(0.01, 1.02, "(b)", transform=ax.transAxes, fontweight="bold")
 
@@ -227,7 +233,7 @@ def fig_kf_mode(data: list[dict], out: Path, venue: str = "thesis") -> None:
 def fig_energy_spectrum(data: list[dict], out: Path, K: int = 100,
                         stems: tuple[str, ...] = ("energy_spectrum",
                                                   "spectrum_K100_nyquist"),
-                        venue: str = "thesis") -> None:
+                        venue: str = "thesis", nondim: bool = False) -> None:
     """t=5 的徑向能譜，含 forcing 波數與 sensor 取樣帶邊界。
 
     k_max^sensor = sqrt(K/π) 是 K 個點取樣所能解析的波數上界（面積論證），
@@ -261,8 +267,8 @@ def fig_energy_spectrum(data: list[dict], out: Path, K: int = 100,
         ax.loglog(kk, c * kk ** -3.0, color="0.5", ls=(0, (4, 2)), lw=0.8,
                   label=r"$k^{-3}$")
 
-    ax.set_xlabel(r"$k$ (1/m)")
-    ax.set_ylabel(r"$E(k)$ (m$^3$/s$^2$)")
+    ax.set_xlabel(r"$k$" + unit("1/m", nondim))
+    ax.set_ylabel(r"$E(k)$" + unit("m$^3$/s$^2$", nondim))
     ax.legend(loc="lower left")
     fig.tight_layout()
     for stem in stems:
@@ -273,7 +279,7 @@ def fig_energy_spectrum(data: list[dict], out: Path, K: int = 100,
 def fig_energy_spectrum_multi(bundles: list[tuple[int, list[dict]]], out: Path,
                               stem: str = "spectrum_multiK_nyquist",
                               venue: str = "thesis",
-                              floor: float = 1e-14) -> None:
+                              floor: float = 1e-14, nondim: bool = False) -> None:
     """單軸疊放多個 sensor 預算的 t=5 徑向能譜。
 
     取代原本的三聯 subfigure。三格各以 0.32\\linewidth 置入，相對造圖寬是 0.34x，
@@ -324,8 +330,8 @@ def fig_energy_spectrum_multi(bundles: list[tuple[int, list[dict]]], out: Path,
                   label=r"$k^{-3}$")
 
     ax.set_ylim(bottom=floor)
-    ax.set_xlabel(r"$k$ (1/m)")
-    ax.set_ylabel(r"$E(k)$ (m$^3$/s$^2$)")
+    ax.set_xlabel(r"$k$" + unit("1/m", nondim))
+    ax.set_ylabel(r"$E(k)$" + unit("m$^3$/s$^2$", nondim))
     ax.legend(loc="lower left", ncol=2)
     fig.tight_layout()
     print(f"[out] {[str(q) for q in save_figure(fig, str(out / stem))]}")
@@ -359,6 +365,8 @@ def main() -> int:
     p.add_argument("--multi-seeds", default="42",
                    help="--multi-k 展開 {seed} 用的 seed 清單（逗號分隔）。"
                         "原三聯圖是單 seed 42，預設沿用以維持可比性。")
+    p.add_argument("--nondim", action="store_true",
+                   help="軸標籤不標 SI 單位（PoF 稿）；預設標 SI（thesis）")
     args = p.parse_args()
 
     setup_style(args.venue)
@@ -386,21 +394,21 @@ def main() -> int:
                 raise SystemExit(f"K={kk} 各 seed 時間點數不一致: {sorted(lens)}")
             _verify_budget(root, [Path(rel.format(seed=seeds[0])).parts[0]], int(kk))
             bundles.append((int(kk), data))
-        fig_energy_spectrum_multi(bundles, out, venue=args.venue)
+        fig_energy_spectrum_multi(bundles, out, venue=args.venue, nondim=args.nondim)
         print(f"[data] multi-K {[(K, len(d)) for K, d in bundles]} seeds={seeds}")
         return 0
 
     root = Path(args.artifacts_root)
     _verify_budget(root, [f"{args.run_stem}{s}" for s in SEEDS], args.sweep_k)
     data = _load(root, stem=args.run_stem, subdir=args.eval_subdir)
-    fig_main_trajectories(data, out, venue=args.venue)
-    fig_band_energy(data, out, venue=args.venue)
-    fig_kf_mode(data, out, venue=args.venue)
+    fig_main_trajectories(data, out, venue=args.venue, nondim=args.nondim)
+    fig_band_energy(data, out, venue=args.venue, nondim=args.nondim)
+    fig_kf_mode(data, out, venue=args.venue, nondim=args.nondim)
     # 三聯圖 spectrum_K{100,200,400}_nyquist 的每一格必須用該 K 自己的資料——
     # 取樣邊界 sqrt(K/pi) 會畫在圖上，用錯 K 的資料等於畫錯的邊界。
     fig_energy_spectrum(data, out, K=args.sweep_k,
                         stems=("energy_spectrum", f"spectrum_K{args.sweep_k}_nyquist"),
-                        venue=args.venue)
+                        venue=args.venue, nondim=args.nondim)
     print(f"[data] {len(data)} seeds, T={data[0]['t'].size}")
     return 0
 

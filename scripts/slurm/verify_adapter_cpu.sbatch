@@ -62,6 +62,7 @@ export PILNJAX_ROOT="${PILNJAX_ROOT:-$HOME/pi-lnn-jax-multire}"
 export PILNN_ROOT="${PILNN_ROOT:-$HOME/pi-lnn-jax-main}"   # 基準側舊 data.py 只認這個
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 export JAX_PLATFORMS=cpu
 
 BASE_SHA="$(git -C "$BASE_WT" rev-parse --short HEAD)"

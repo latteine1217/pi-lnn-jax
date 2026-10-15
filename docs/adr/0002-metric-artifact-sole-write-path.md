@@ -63,7 +63,7 @@ produced by `compute_metrics`. They are carried by a `run_measurements` channel 
 refuses unknown keys, and they are summarized as a `run_scalar` observation. Their
 definitions carry a truthful formula and a real unit rather than the
 `compute_metrics[...]` projection template. The domain term is **Cost measurement**,
-recorded in `CONTEXT.md`.
+recorded in `GLOSSARY.md`.
 
 They are recorded as measurements rather than provenance because they are consumed as
 data: the cost-accuracy curve plots one of them on its x axis.

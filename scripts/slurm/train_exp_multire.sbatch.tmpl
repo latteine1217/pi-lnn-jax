@@ -37,6 +37,7 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 command -v uv >/dev/null 2>&1 || { echo "[ERR] uv 不在 PATH；先在 lab-server 裝 uv" >&2; exit 2; }
 # Compute node 無 internet；強制 offline，要求 head node 已 uv sync
 export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 [ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在；請先在 head node 跑 'uv sync --python 3.12'" >&2; exit 3; }
 
 export JAX_PLATFORMS=cuda

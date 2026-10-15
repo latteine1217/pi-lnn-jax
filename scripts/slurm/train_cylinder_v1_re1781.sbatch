@@ -21,6 +21,7 @@ cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
 export PYTHONUNBUFFERED=1 PYTHONPATH="${PYTHONPATH:-}:."
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export UV_OFFLINE=1 JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=false
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 export PILNN_FOF_CHUNK="${PILNN_FOF_CHUNK:-256}"
 [ -x .venv/bin/python ] || { echo "[ERR] .venv 不存在" >&2; exit 3; }
 

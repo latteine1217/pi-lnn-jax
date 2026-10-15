@@ -39,6 +39,7 @@ export PYTHONPATH="${PYTHONPATH:-}:."
 # uv 不在 compute node 的預設 PATH（漏這行的話生成跑完才在判定那步掛掉）
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
 GEN="$JAX_ROOT/scripts/dns_generator/generate_kolmogorov_dns_fp64.py"
 [ -f "$GEN" ] || { echo "[ERR] 缺生成器：$GEN" >&2; exit 2; }

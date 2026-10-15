@@ -147,10 +147,13 @@ MODEL_SCHEMA = {
     # 「把壞掉的 bias 修好」。見 knowledge/experiments/cylinder-advective-attention-negative-2026-07-29.md
     "relpos_bias_norm":              (str,   "layernorm", _one_of("relpos_bias_norm", ("layernorm", "none"))),
     "relpos_bias_zero_init":         (bool,  False, None),
+    # 時間 encoder 的遞迴 cell："cfc" 為 PI-CON；"gru_dt" 是把 Δt 當輸入特徵的 GRU 對照臂，
+    # 用來分離 CfC 連續時間閘門的獨立貢獻（不規則時鐘實驗）。
+    "temporal_cell":                 (str,   "cfc", _one_of("temporal_cell", ("cfc", "gru_dt"))),
     # RWF（Random Weight Factorization, Wang 2023）：僅作用於 decoder trunk 座標 MLP
     # 2026-08-29 起預設 True：n=5 判別顯示 rwf on 在主指標上顯著較好
     # （-0.114 pp, t=-3.92，五 seed 範圍不重疊；knowledge/experiments/
-    # kolmogorov-rwf-multiseed-2026-08-29.md）。舊註記「exp_521 rwf-only 中性偏微負、
+    # history-through-2026-09-14.md#e06）。舊註記「exp_521 rwf-only 中性偏微負、
     # 無淨益」出自單 seed × 錯誤 eval stride 的疊加（TD-4），已推翻。
     "use_rwf":                       (bool,  True,  None),
     "rwf_mean":                      (float, 1.0,  None),
@@ -209,6 +212,13 @@ TRAIN_SCHEMA = {
     # 峰值記憶體 ∝ 1/M（大 K cross-attention OOM 解）。預設 1=全量。n_collo/n_sensor_q 須可整除 M。
     # 注意：AL 的 C² 在 M>1 下是 per-chunk 近似（chunk-mean 方差），非精確全量。
     "grad_accum_chunks":             (int,   1,    _positive("grad_accum_chunks")),
+    # encoder 輸入與監督目標的時間 stride 拆開（K–Δt 平面的 2×2 消融）。兩者都是對
+    # **已載入**的 sensor 序列（time_strides 之後）再取的 stride；預設 1/1 = 既有行為
+    # （encoder 與監督吃同一個序列）。只允許其中一個 ≠1，讓兩條時間軸互為子集。
+    # Why：原本 encoder 輸入與 sensor loss 的目標是同一個陣列，於是「CfC 看到更多幀」
+    # 與「監督點更多」只能一起變，分不開更密取樣的收益來自哪一個。
+    "encoder_time_stride":           (int,   1,    _positive("encoder_time_stride")),
+    "target_time_stride":            (int,   1,    _positive("target_time_stride")),
     # RAR（residual-adaptive refinement）：每 rar_freq 步改用「pool 中殘差最大的點」
     # 當 collocation。原本只有 CLI 旗標，於是開了 RAR 的 run 在 config 上看不出來——
     # 那正是本 repo 反覆踩到的 provenance 洞。預設與 pipeline policy 的相容預設逐字相同
@@ -311,6 +321,13 @@ TRAIN_SCHEMA = {
     # （amp=0 時 OscillatingGeometry 退化回靜態，見 test_amp_zero_reduces_to_static）。
     # 這是明示的 ablation 旋鈕，不是竄改資料。
     "controlled_amp_scale":          (float, 1.0,  _non_negative("controlled_amp_scale")),
+    # ── W&B 訓練紀錄（pi_lnn_jax/tracking.py；兩案共用）──
+    # 純觀測副作用：只讀既有數值，不動 RNG / state / summary.json，預設關閉。
+    # scalar 跟 stdout 同頻（Kolmogorov run.log_every、cylinder 每 500 步）；
+    # wandb_weights_every 控制逐層權重 norm + 直方圖的頻率。
+    "wandb":                         (bool,  False, None),
+    "wandb_project":                 (str,   "pi-con", None),
+    "wandb_weights_every":           (int,   500,  _positive("wandb_weights_every")),
 }
 
 

@@ -26,6 +26,7 @@ export PYTHONPATH="${PYTHONPATH:-}:."
 export PILNJAX_DATA_ROOT="${PILNJAX_DATA_ROOT:-$HOME/pi-lnn-jax-main}"
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 export JAX_PLATFORMS=cpu
 
 DNS="${DNS:-data/dns/kolmogorov_dns_fp64_etdrk4_Re10000_N256_T10_dt2p5e4_si100_ds4_cuda.npy}"

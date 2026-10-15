@@ -72,6 +72,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pi_lnn_jax import tracking
 from pi_lnn_jax.ckpt import TrainState
 from pi_lnn_jax.curriculum import (
     physics_weight_at_step,
@@ -95,6 +96,7 @@ from pi_lnn_jax.pipeline.kolmogorov.assembly import (
     TrainingContext,
     build_context,
     effective_sensor_query_points,
+    encoder_context,
     re_norm_scale_of,
 )
 from pi_lnn_jax.pipeline.kolmogorov.config import (
@@ -177,13 +179,29 @@ def _to_ckpt_state(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_training(ctx: TrainingContext) -> TrainResult:
-    """initialize → restore → run_loop → refine → finalize。"""
-    journal = RunJournal()
-    state = initialize(ctx, journal)
-    state = restore(ctx, state)
-    state = run_loop(ctx, state, journal)
-    state = refine(ctx, state)
-    return finalize(ctx, state, journal)
+    """initialize → restore → run_loop → refine → finalize。
+
+    W&B（`run.wandb`）在這一層開關：開啟時 run 期間 `tracking.get_tracker()` 有值，
+    各 phase 只做 `if tracker is not None` 的旁路記錄。任何例外（含 NaN fail-fast 的
+    `sys.exit(2)`）都以 exit_code=1 結束 wandb run 後照原樣往外拋。
+    """
+    run = ctx.config.run
+    if run.wandb:
+        tracking.start(ctx.config, case="kolmogorov", name=Path(ctx.artifacts_dir).name,
+                       project=run.wandb_project, wandb_dir=ctx.artifacts_dir,
+                       extra={"model_name": ctx.model_name, "opt_info": ctx.opt_info})
+    ok = False
+    try:
+        journal = RunJournal()
+        state = initialize(ctx, journal)
+        state = restore(ctx, state)
+        state = run_loop(ctx, state, journal)
+        state = refine(ctx, state)
+        result = finalize(ctx, state, journal)
+        ok = True
+        return result
+    finally:
+        tracking.finish(exit_code=0 if ok else 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -643,6 +661,9 @@ def initialize(ctx: TrainingContext, journal: RunJournal) -> TrainingState:
     )
     n_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
     print(f"\nModel: {ctx.model_name}  params={n_params:,}")
+    tracker = tracking.get_tracker()
+    if tracker is not None:
+        tracker.summary({"n_params": int(n_params)})
     # 初始化階段的 params digest。尾列的 `params_digest` 記的是**訓練後**的
     # 參數（在 finalize 寫），無法用來檢查「建構 + 初始化」這一段；
     # 故在此另記一份，由 `Ledger.note` 帶到尾列。
@@ -921,6 +942,12 @@ def run_loop(ctx: TrainingContext, state: TrainingState,
     t_train_start = time.time()
     last_log_t = t_train_start
     last_metrics: dict[str, float] = {}
+    last_log_step = start_step
+    tracker = tracking.get_tracker()
+    # GradNorm task 順序 = tracking.TERMS 的前綴（cont 只在 cont_gradnorm 時是 task）
+    task_terms = tracking.TERMS[:len(task_weights)]
+    if tracker is not None:
+        tracker.log_params(start_step, params)
 
     # 實驗2 train-time sensor dropout（Python float；0=停用，下游 RNG 流 bit-identical）
     sensor_dropout_rate = float(curriculum.sensor_dropout_rate)
@@ -967,6 +994,8 @@ def run_loop(ctx: TrainingContext, state: TrainingState,
                 max_weight=loss.gradnorm_max,
             )
             task_weights = gradnorm_weights(gn_state)
+            if tracker is not None:
+                tracker.log_gradnorms(s, dict(zip(task_terms, task_grads)))
         # AL update 用獨立 freq；al_warmup_steps 內 lambda 保持 0（只走 ρ·C²/2 暖機）
         if plan.trig_al:
             lambda_min = (
@@ -996,6 +1025,24 @@ def run_loop(ctx: TrainingContext, state: TrainingState,
                 "al_constraint": float(al_c),
                 "poisson": float(pr),
             }
+            if tracker is not None:
+                losses = {"data": sl, "mom_u": mu, "mom_v": mv, "cont": c}
+                if loss.poisson_weight > 0:
+                    losses["poisson"] = pr
+                tracker.log_train(
+                    s, total=total, losses=losses,
+                    weights=dict(zip(task_terms, task_weights)),
+                    curriculum={"w_phys": plan.w_phys_now, "t_max": plan.t_upper,
+                                "n_collo": plan.n_collo_now},
+                    sec_per_step=wall / (s - last_log_step),
+                    al_lambda=al_state.lambda_ if loss.use_al else None,
+                    # mse 模式下 C_AL 恆等於 cont，只在 signed_mean 時是另一個量
+                    al_constraint=(al_c if loss.use_al and loss.al_constraint_mode != "mse"
+                                   else None),
+                )
+            last_log_step = s
+        if tracker is not None and s % run.wandb_weights_every == 0:
+            tracker.log_params(s, params)
         # 7. fail-fast
         if not np.isfinite(float(total)):
             print(f"[FATAL] loss NaN/Inf at step {s} — abort", flush=True)
@@ -1012,14 +1059,18 @@ def run_loop(ctx: TrainingContext, state: TrainingState,
         # 9. eval (Wave 5: POC 階段只 eval d0 的 DNS；multi-Re 各 Re eval 留給 evaluate_multi_re)
         if plan.trig_eval:
             print(f"  --- mid-eval at step {s} ---", flush=True)
+            # 情境＝訓練時 encoder 看到的序列（encoder_context；預設就是 sensor_vals 本身）
+            _ev, _et = encoder_context(re_batch_d0)
             r = evaluate_against_dns(
                 model, params,
-                re_batch_d0.sensor_vals, re_batch_d0.sensor_pos,
-                re_batch_d0.re_norm, re_batch_d0.sensor_time,
+                _ev, re_batch_d0.sensor_pos,
+                re_batch_d0.re_norm, _et,
                 d0["norm_stats"],
                 ctx.dns_u, ctx.dns_v, ctx.dns_t, verbose=True,
             )
             eval_history.append({"step": s, "results": r})
+            if tracker is not None:
+                tracker.log_probe(s, r)
 
     train_wall = time.time() - t_train_start
     print("-" * len(header))
@@ -1190,6 +1241,9 @@ def refine(ctx: TrainingContext, state: TrainingState) -> TrainingState:
             if (outer + 1) % max(1, n_outer // 20) == 0:
                 cur_loss = mb_lbfgs_loss(params, (t_idx, cx_o, cy_o, ct_o))
                 print(f"  [refine] outer {outer+1:4d}/{n_outer}  loss={float(cur_loss):.4e}", flush=True)
+                tracker = tracking.get_tracker()
+                if tracker is not None:
+                    tracker.log_refine(int(run.steps) + outer + 1, cur_loss)
     elif refine_choice == "lm":
         # LM uses residual vector (per-point)
         # NOTE: LM 對 vanilla Liquid arch; B0/B2 baseline 暫不支援
@@ -1314,14 +1368,23 @@ def finalize(ctx: TrainingContext, state: TrainingState,
     print("\n" + "=" * 80)
     print("=== Final DNS evaluation (mid time slice, dataset[0]) ===")
     t_eval_start = time.time()
+    # 情境＝訓練時 encoder 看到的序列（encoder_context；預設就是 sensor_vals 本身）
+    _ev, _et = encoder_context(re_batch_d0)
     final_results = evaluate_against_dns(
         model, params,
-        re_batch_d0.sensor_vals, re_batch_d0.sensor_pos,
-        re_batch_d0.re_norm, re_batch_d0.sensor_time,
+        _ev, re_batch_d0.sensor_pos,
+        re_batch_d0.re_norm, _et,
         d0["norm_stats"],
         ctx.dns_u, ctx.dns_v, ctx.dns_t, verbose=True,
     )
     print(f"final eval wall: {time.time() - t_eval_start:.2f}s")
+    tracker = tracking.get_tracker()
+    if tracker is not None:
+        # refine 會把 step 推過 total_steps；以 last_step 續接，否則 wandb 丟棄這批。
+        # 這是單一時刻的 probe；論文口徑的 eval/ 由 evaluate_exp245 --wandb 接回同一個 run。
+        final_step = max(total_steps, tracker.last_step)
+        tracker.log_probe(final_step, final_results)
+        tracker.log_params(final_step, params)
     eval_history.append({"step": total_steps, "results": final_results, "final": True})
 
     # ── Final ckpt save（避免覆寫 loop 內剛存的同 step）──
@@ -1410,6 +1473,10 @@ def finalize(ctx: TrainingContext, state: TrainingState,
         print(f"  [warn] resume 參考值算不出來，已記 unavailable_reason："
               f"{type(exc).__name__}. 本輪結果不受影響，下一輪 resume 會少一個比對基準。")
     (artdir / "resume_reference.json").write_text(json.dumps(ref, indent=2))
+    if tracker is not None:
+        tracker.summary({"train_wall_seconds": journal.train_wall})
+        for name in ("summary.json", "eval_history.json"):
+            tracker.save_file(artdir / name)
 
     if ledger is not None:
         # 尾列同時存下重播所需的 provenance：replay_schedule 必須能還原錄製當時的

@@ -51,7 +51,7 @@ def main() -> None:
     ap.add_argument("--les", default=_DEFAULT_LES)
     ap.add_argument("--kmax", type=int, default=16)
     ap.add_argument("--n-snapshots", type=int, default=8)
-    ap.add_argument("--outdir", default="paper/tmlr-format/figures/results")
+    ap.add_argument("--outdir", default="paper/pof-format/figures/results")
     args = ap.parse_args()
 
     coords = np.asarray(json.load(open(args.sensor_json))["selected_coordinates"], dtype=np.float64)

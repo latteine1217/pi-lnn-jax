@@ -11,7 +11,7 @@ dependencies = [
   "jax>=0.4.30",
   "jaxlib>=0.4.30",
   "flax>=0.10",
-  "optax>=0.2",
+  "optax>=0.2.4",
   "numpy>=1.26",
   "scipy>=1.13",
   "optimistix>=0.1.0",  # Wave 5 refiners: LBFGS + Levenberg-Marquardt
@@ -25,6 +25,8 @@ dependencies = [
   # cylinder 前處理（RealPDEBench Arrow shard → 本專案 npz 契約）。
   # 2026-08-21 從 pi-lnn 移植 qrpivot/CylinderDataset 後，這條路不再借 pi-lnn 的 venv。
   "pyarrow>=15.0",
+  # W&B 訓練紀錄（run.wandb；pi_lnn_jax/tracking.py 只在開啟時 import）。
+  "wandb>=0.19",
 ]
 
 # What: 開發工具（測試與 lint），走 PEP 735 dependency-groups，`uv sync` 預設會裝。

@@ -124,6 +124,8 @@ def test_fingerprint_covers_every_arch(arch):
         expected -= {"relpos_bias_norm"}
     if not getattr(model, "relpos_bias_zero_init", False):
         expected -= {"relpos_bias_zero_init"}
+    if getattr(model, "temporal_cell", "cfc") == "cfc":
+        expected -= {"temporal_cell"}
     assert set(fp) == expected, f"{arch} 的指紋欄位與 dataclass 不符"
 
     if arch != "liquid":

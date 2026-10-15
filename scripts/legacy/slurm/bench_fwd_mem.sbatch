@@ -25,7 +25,7 @@
 #   cd ~/pi-lnn-jax && git pull && uv sync --python 3.12
 #   （.venv 需含 jax[cuda12]；既有訓練 template 同此假設）
 #
-# 送出：sbatch scripts/slurm/bench_fwd_mem.sbatch
+# 送出：sbatch scripts/legacy/slurm/bench_fwd_mem.sbatch
 # 結果：logs/bench_fwd_mem_<jobid>.out（含對照表）+ logs/bench_fwd_mem_<jobid>.jsonl
 
 set -euo pipefail

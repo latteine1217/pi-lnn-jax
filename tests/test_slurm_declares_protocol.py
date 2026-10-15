@@ -30,6 +30,7 @@ PROTOCOL_AWARE = (
     "cost_accuracy.py",
     "classical_baselines_fair.py",
     "enkf_baseline.py",
+    "eval_pressure_limit.py",
 )
 
 #: 豁免：逐檔列理由的硬編碼字面清單。由被檢查之物自己構成的豁免會恆真。

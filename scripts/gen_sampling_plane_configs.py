@@ -17,9 +17,11 @@ Why:
     本批的兩個設計決定：
       * **M 全格固定 2。** 最吃記憶體的格（K=400/T=201，80,400 個 sensor 時空點）
         實測在 M=2 下跑得完，且 M=2 在 K=400 上同時較準（−2.25%）與較快（2.3×）。
-      * **nsq 全格固定 512。** 最小母體是 K=50/Δt=0.5 的 T×K = 550
-        （T 為實際載入後的幀數，不是 201//stride）。512 是能讓 20 格都不觸發
-        `effective_sensor_query_points` 降級的最大 2 的冪，且被 M=2 整除。
+        格因此止於 K=400：K=800/T=101 在 M=2 下第一個訓練步就 OOM（jobs 6012–6013，
+        `jit_step_fn` 要一次配置 14.64 GiB）。記憶體隨 K 走的是 decoder 端，不是 sensor 母體
+        ——K=800/T=101 的母體 80,800 與跑得完的 K=400/T=201 幾乎相同。
+      * **nsq 全格固定 2000**（主線值）。降到 512 以湊滿矩形已被實測否決，理由見下方
+        `NSQ` 的註解；母體 T×K 小於 2000 的格直接跳過，不靜默降級。
 
 Usage:
     uv run python scripts/gen_sampling_plane_configs.py --preset pilot --tag sp2

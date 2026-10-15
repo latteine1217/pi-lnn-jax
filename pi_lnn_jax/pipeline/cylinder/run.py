@@ -80,6 +80,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pi_lnn_jax import tracking
 from pi_lnn_jax.boundary import (
     CylinderGeometry,
     OscillatingGeometry,
@@ -139,10 +140,25 @@ class TrainResult(NamedTuple):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_training(ctx: TrainingContext) -> TrainResult:
-    """initialize → run_loop → finalize（cylinder 無 restore / refine）。"""
-    state = initialize(ctx)
-    state = run_loop(ctx, state)
-    return finalize(ctx, state)
+    """initialize → run_loop → finalize（cylinder 無 restore / refine）。
+
+    W&B 開關與例外語意同 `kolmogorov/run.py:run_training`。
+    """
+    run = ctx.config.run
+    if run.wandb:
+        # 不用 run.artifacts_dir：cylinder 不落 artifact，該欄位只許在 ledger gate 內讀
+        # （test_cylinder_ledger）。落點交給 WANDB_DIR。
+        tracking.start(ctx.config, case=run.case, name=Path(run.config_path).stem,
+                       project=run.wandb_project, extra={"opt_info": ctx.opt_info})
+    ok = False
+    try:
+        state = initialize(ctx)
+        state = run_loop(ctx, state)
+        result = finalize(ctx, state)
+        ok = True
+        return result
+    finally:
+        tracking.finish(exit_code=0 if ok else 1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,6 +359,9 @@ def initialize(ctx: TrainingContext) -> TrainingState:
     params = model.init(jax.random.PRNGKey(seed), sv_TKC, sp, RE_NORM, st, init_xy, init_t)
     n_params = sum(p.size for p in jax.tree_util.tree_leaves(params))
     print(f"  params={n_params:,}")
+    tracker = tracking.get_tracker()
+    if tracker is not None:
+        tracker.summary({"n_params": int(n_params)})
     # 初始化階段的 params digest。尾列的 `params_digest` 記的是**訓練後**的
     # 參數（在 finalize 寫），無法用來檢查「建構 + 初始化」這一段；
     # 故在此另記一份，由 `Ledger.note` 帶到尾列。
@@ -398,6 +417,11 @@ def run_loop(ctx: TrainingContext, state: TrainingState) -> TrainingState:
     rk, np_rng = _open_loop_streams(run.seed)
     t0 = time.time()
     last = t0
+    last_log_step = -1   # 迴圈含第 0 步，第一個 log 點（s=0）算走了一步
+    tracker = tracking.get_tracker()
+    # GradNorm 只管三個 task（continuity 由 AL 約束）；ns_u/ns_v 在 W&B 記成 mom_u/mom_v，
+    # 與 Kolmogorov 同名（tracking.TERMS）
+    task_terms = tracking.TERMS[:len(task_weights)]
     print(f"\n{'step':>6s} {'total':>11s} {'data':>11s} {'ns_u':>11s} "
           f"{'ns_v':>11s} {'cont':>11s} {'bc':>11s} {'w_d/u/v/c':>22s} {'t_max':>6s} {'wall':>7s}")
     for s in range(steps + 1):
@@ -417,6 +441,8 @@ def run_loop(ctx: TrainingContext, state: TrainingState) -> TrainingState:
             gn_state = gradnorm_step(gn_state, tg, ema_momentum=gradnorm_ema,
                                      min_weight=gradnorm_min, max_weight=gradnorm_max)
             task_weights = gradnorm_weights(gn_state)
+            if tracker is not None:
+                tracker.log_gradnorms(s, dict(zip(task_terms, tg)))
         # AL dual update：用該步 continuity mse（aux[3]）更新 λ
         if plan.trig_al:
             al_state = al_update(al_state, aux[3])
@@ -429,6 +455,18 @@ def run_loop(ctx: TrainingContext, state: TrainingState) -> TrainingState:
             print(f"{s:>6d} {float(total):>11.4e} {float(dl):>11.4e} "
                   f"{float(nu_l):>11.4e} {float(nv_l):>11.4e} {float(c_l):>11.4e} "
                   f"{float(bl):>11.4e} {w_str:>22s} {plan.t_max:>6.2f} {wall:>7.2f}")
+            if tracker is not None:
+                tracker.log_train(
+                    s, total=total,
+                    losses={"data": dl, "mom_u": nu_l, "mom_v": nv_l, "cont": c_l, "bc": bl},
+                    weights=dict(zip(task_terms, task_weights)),
+                    curriculum={"t_max": plan.t_max},
+                    sec_per_step=wall / (s - last_log_step),
+                    al_lambda=al_state.lambda_,
+                )
+            last_log_step = s
+        if tracker is not None and s % run.wandb_weights_every == 0:
+            tracker.log_params(s, params)
         if not np.isfinite(float(total)):
             # fail-fast：非零 exit code，且**不**繼續 ledger 尾列與 eval。
             # Why 不用 break：break 會讓壞掉的 run 走完 finalize、印出 `ke_pred=nan`
@@ -577,6 +615,24 @@ def finalize(ctx: TrainingContext, state: TrainingState) -> TrainResult:
         print(f"  freestream: ke_pred/ke_ref = {np.mean(free_r):.4f}   KE rel-err = {np.mean(free_e):.4f}")
     print(f"  wake:       ke_pred/ke_ref = {np.mean(wake_r):.4f}   KE rel-err = {np.mean(wake_e):.4f}")
     print(f"  inflow band (x<0.02) mean u_pred = {np.mean(inflow_u):.4f}  (u_inf={u_inf:.4f})")
+    tracker = tracking.get_tracker()
+    if tracker is not None:
+        # 本案的正式評估就是這裡（全部 eval 時刻）；scalar 與上方 stdout 報表同一組 mean，
+        # 鍵名沿用 compute_metrics 的原名（div_pred_l2 實為 RMS，見 scripts/CLAUDE.md §7）
+        metrics = {
+            "ke_rel_err": np.mean(ke_relerrs), "ke_pred_over_ref": np.mean(ke_ratios),
+            "omega_rel_err": np.mean(omega_relerrs), "div_pred_l2": np.mean(div_l2s),
+            "wake_ke_rel_err": np.mean(wake_e), "wake_ke_pred_over_ref": np.mean(wake_r),
+            "inflow_u_mean": np.mean(inflow_u),
+        }
+        if int(free_mask.sum()) > 0:
+            metrics["free_ke_rel_err"] = np.mean(free_e)
+            metrics["free_ke_pred_over_ref"] = np.mean(free_r)
+        tracker.log_eval(metrics=metrics, x="t", curves=("ke_rel_err", "omega_rel_err"), per_t={
+            "t": [float(st[ti]) for ti in dns_t_idx], "ke_rel_err": ke_relerrs,
+            "ke_pred_over_ref": ke_ratios, "omega_rel_err": omega_relerrs,
+            "div_pred_l2": div_l2s, "wake_ke_rel_err": wake_e, "inflow_u": inflow_u,
+        })
 
     return TrainResult(
         state=state,

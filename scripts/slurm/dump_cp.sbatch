@@ -15,6 +15,7 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$HOME/pi-lnn-jax}"
 export PYTHONUNBUFFERED=1 UV_OFFLINE=1
+export UV_NO_SYNC=1   # TD-27：compute node 離線，uv run 的預設同步只會失敗
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # PILNJAX_DATA_ROOT rebases the config's relative sensor/DNS paths to the lab-server data
 # tree (default points at the Mac dev path). Same as train_exp.sbatch.tmpl.
