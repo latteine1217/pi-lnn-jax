@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -137,7 +136,7 @@ def build_snapshot_matrix(shards: list[dict], time_stride: int,
 
     rows_list = []
     for si, shard in enumerate(shards):
-        u_all, v_all, vo_all = shard["u"], shard["v"], shard["vo"]
+        u_all, v_all = shard["u"], shard["v"]
         T = u_all.shape[0]
         t_idx = np.arange(0, T, time_stride)
         T_sub = len(t_idx)

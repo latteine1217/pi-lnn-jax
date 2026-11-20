@@ -41,8 +41,6 @@ def _load_arrow_grid(shard_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarr
         batch = reader.read_next_batch()
 
     row = {name: batch.column(name)[0].as_py() for name in batch.schema.names}
-    T    = row["shape_t"]
-    H, W = row["shape_h"], row["shape_w"]
     xH, xW = row["x_shape_h"], row["x_shape_w"]
     t_len = row["t_shape"]
 

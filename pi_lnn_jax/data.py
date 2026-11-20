@@ -161,7 +161,12 @@ def load_sensors_from_path(json_path: str | Path, time_stride: int = 2) -> dict:
                 f"NPZ {npz_path.name} 的 channel '{c}' 有 {raw.shape[1]} 幀，"
                 f"但同檔的 'time' 有 {time_all.shape[0]} 個時刻")
         arr = raw[:, ::time_stride]  # (K, T_s)
-        m, s = float(arr.mean()), float(arr.std())
+        # NaN＝非同步取樣下該 (sensor, 幀) 沒有觀測（scripts/gen_async_sensors.py）。正規化常數只取觀測到的值；
+        # 沒有 NaN 的檔仍走原式，常數逐位元不變（verify_norm_stats 以 1e-9 比對）。
+        if np.isnan(arr).any():
+            m, s = float(np.nanmean(arr)), float(np.nanstd(arr))
+        else:
+            m, s = float(arr.mean()), float(arr.std())
         if s < 1e-8:
             raise ValueError(f"channel '{c}' std≈0 ({s:.2e})，無法 normalize；資料可能為常數場")
         norm_stats[f"{c}_mean"] = m

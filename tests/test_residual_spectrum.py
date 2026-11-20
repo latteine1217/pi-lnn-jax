@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from diag_residual_spectrum import (  # noqa: E402
-    Ops, _shell_index, _shell_power, _assert_shell_matches_repo,
+    Ops, _shell_index, _assert_shell_matches_repo,
     residual_terms, spectra_of,
 )
 

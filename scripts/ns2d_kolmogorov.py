@@ -118,7 +118,6 @@ if __name__ == "__main__":
     enable_x64()
     import argparse
     import numpy as np
-    from pi_lnn_jax.data import load_dns_from_path  # noqa: E402
 
     ap = argparse.ArgumentParser(description="驗證 NS 求解器重現 DNS")
     ap.add_argument("--dns", required=True)

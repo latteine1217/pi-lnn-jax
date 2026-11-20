@@ -150,6 +150,21 @@ MODEL_SCHEMA = {
     # 時間 encoder 的遞迴 cell："cfc" 為 PI-CON；"gru_dt" 是把 Δt 當輸入特徵的 GRU 對照臂，
     # 用來分離 CfC 連續時間閘門的獨立貢獻（不規則時鐘實驗）。
     "temporal_cell":                 (str,   "cfc", _one_of("temporal_cell", ("cfc", "gru_dt"))),
+    # 資訊可及性的兩個對照臂（間歇重建的誤差在 gap 內單調上升）："bidirectional" 讓 encoder 另跑反向 scan，
+    # 每幀狀態含整條序列；"bracket" 讓 decoder 同時讀 ≤t 的最後一幀與下一幀。預設皆維持既有行為。
+    "temporal_direction":            (str,   "forward", _one_of("temporal_direction", ("forward", "bidirectional"))),
+    "decoder_frame_context":         (str,   "latest", _one_of("decoder_frame_context", ("latest", "bracket"))),
+    # CfC 設計重測（knowledge/experiments/kolmogorov-cfc-design-retest-2026-10.md）：第一層殘差、查詢時刻的
+    # 閉式解、trunk 不吃 elapsed time。預設皆維持既有行為。
+    "cfc_residual":                  (bool,  False, None),
+    "cfc_query_time":                (bool,  False, None),
+    "trunk_elapsed_time":            (bool,  True,  None),
+    # 非同步取樣（sensor_vals 中 NaN＝該幀該 sensor 沒有觀測）；資料檔由 scripts/gen_async_sensors.py 產生
+    "async_sensors":                 (bool,  False, None),
+    # 零階保持對照（設計重測 E5c）：B2 每個 sensor 沿用最後一次觀測值；需 async_sensors 且 num_temporal_cfc_layers=0
+    "async_hold":                    (bool,  False, None),
+    # 空間分塊、多 case 訓練（設計重測 E6）：>1 時 domain 切成 n×n 塊，trunk 只看塊內局部座標、attention 只讀同塊
+    "spatial_blocks":                (int,   1,    _positive("spatial_blocks")),
     # RWF（Random Weight Factorization, Wang 2023）：僅作用於 decoder trunk 座標 MLP
     # 2026-08-29 起預設 True：n=5 判別顯示 rwf on 在主指標上顯著較好
     # （-0.114 pp, t=-3.92，五 seed 範圍不重疊；knowledge/experiments/
@@ -344,6 +359,10 @@ DATA_SCHEMA = {
     # 行為；多-Re 訓練到高 Re（如 1e6）時設成該上界，讓 FiLM 條件落在 [0,1]。
     "re_norm_scale":                 (float, 10000.0, _greater_than_one("re_norm_scale")),
     "observed_sensor_channels":      (list,  ["u", "v"], None),
+    # oracle 監督（診斷用）：sensor_jsons[0] 仍是 encoder 輸入；此檔（完整時間序列、同一組 sensor）
+    # 只當監督目標，以 sensor_jsons[0] 的 norm_stats 正規化。保留幀須是它的子集。空字串＝關閉。
+    # 部署時拿不到這些點，見 knowledge/experiments/kolmogorov-cfc-isolation-2026-10.md 的 oracle 2×2。
+    "supervision_sensor_json":       (str,   "",   None),
     # DEPRECATED（inert）：實際 forcing 由 model 的 forcing_A_init/forcing_k_f_init 決定，
     # 此二 key 不被任何 code 讀取（值與 model 預設 0.1/2.0 巧合一致，故歷來無數值影響）。
     # 保留僅因既有 config 大量設了它們；勿移除以免 validation fail。新 config 請改設
@@ -546,6 +565,10 @@ class ModelConfig:
     @property
     def T_total(self) -> float:
         return float(self.values["T_total"])
+
+    @property
+    def async_sensors(self) -> bool:
+        return bool(self.values["async_sensors"])
 
     def to_kwargs(self) -> dict[str, Any]:
         """Return an isolated dict only at the existing model-factory seam."""

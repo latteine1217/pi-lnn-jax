@@ -25,13 +25,15 @@ def test_rff_distinguishes_boundaries():
 
 def test_spatial_encoder_routes_by_periodic_domain():
     # periodic_domain=False → spatial_emb 為 FourierEmbs；True → LearnableFourierEmb
-    enc_np = SpatialSetEncoder(d_model=32, num_layers=1, 
+    # TODO: enc_np/enc_p/sp/sv/st 建好後未使用，測試名稱宣稱的「依 periodic_domain 路由」並未被斷言；
+    # 下方只驗非週期版的 pos encoding 能區分邊界。
+    enc_np = SpatialSetEncoder(d_model=32, num_layers=1,  # noqa: F841
                               sensor_value_dim=2, fourier_embed_dim=128, periodic_domain=False)
-    enc_p = SpatialSetEncoder(d_model=32, num_layers=1, 
+    enc_p = SpatialSetEncoder(d_model=32, num_layers=1,  # noqa: F841
                              sensor_value_dim=2, fourier_embed_dim=128, periodic_domain=True)
-    sp = jnp.asarray(np.random.RandomState(0).uniform(0, 1, (10, 2)), jnp.float32)
-    sv = jnp.asarray(np.random.RandomState(1).randn(5, 10, 2), jnp.float32)
-    st = jnp.linspace(0, 1, 5).astype(jnp.float32)
+    sp = jnp.asarray(np.random.RandomState(0).uniform(0, 1, (10, 2)), jnp.float32)  # noqa: F841
+    sv = jnp.asarray(np.random.RandomState(1).randn(5, 10, 2), jnp.float32)  # noqa: F841
+    st = jnp.linspace(0, 1, 5).astype(jnp.float32)  # noqa: F841
     # init 兩者；確認非週期版的 pos encoding 對 x=0 vs x=1 不同
     enc = SpatialSetEncoder(d_model=32, num_layers=1, 
                             sensor_value_dim=2, fourier_embed_dim=128, periodic_domain=False)

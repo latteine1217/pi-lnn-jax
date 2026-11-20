@@ -127,6 +127,16 @@ def band_fourier_encode(z: jnp.ndarray, domain_length: float, wavenumbers) -> jn
     return jnp.concatenate([p[:, :, None] for p in parts], axis=2).reshape(z.shape[0], -1)
 
 
+def block_split(xy: jnp.ndarray, n_blocks: int, domain_length: float) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """把座標切到 n_blocks×n_blocks 的塊：回傳（塊內局部座標，塊編號 x_cell·n + y_cell）。
+
+    局部座標 = xy − 塊原點；原點經 stop_gradient，∂local/∂xy = I，PDE residual 的座標導數不受影響。
+    """
+    size = domain_length / n_blocks
+    cell = jnp.clip(jnp.floor(jax.lax.stop_gradient(xy) / size), 0, n_blocks - 1)
+    return xy - cell * size, (cell[..., 0] * n_blocks + cell[..., 1]).astype(jnp.int32)
+
+
 def _repeat3(x: jnp.ndarray) -> jnp.ndarray:
     """沿 axis 0 block 複製 3 份（c=0/1/2 對齊 trunk 的 [3N] block 排列）。
 
@@ -306,6 +316,9 @@ class CfCStep(nn.Module):
     input_dependent_tau: bool = False
     tau_mod_scale: float = 2.0
     torch_style_init: bool = False
+    # True：scan 的逐步輸出改為 [f1, f2, t_b, τ]（4×hidden），供 decoder 在查詢時刻重算閘門
+    # （TemporalCfCEncoder.cfc_query_time）。carry 仍是 new_h，狀態遞迴不變。
+    emit_parts: bool = False
 
     @property
     def _kinit(self):
@@ -356,6 +369,9 @@ class CfCStep(nn.Module):
             dt_t_b = dt_t
         gate = jax.nn.sigmoid(-tau_a * dt_t_b + t_b)
         new_h = gate * f1 + (1.0 - gate) * f2
+        if self.emit_parts:
+            parts = jnp.concatenate([f1, f2, t_b, jnp.broadcast_to(tau_a, f1.shape)], axis=-1)
+            return new_h, parts
         return new_h, new_h
 
 
@@ -381,6 +397,31 @@ class GRUDtStep(nn.Module):
         new_h, _ = nn.GRUCell(features=self.hidden_size, kernel_init=kinit, name='gru')(
             h, jnp.concatenate([x_t, dt_col], axis=-1))
         return new_h, new_h
+
+
+class AsyncCellStep(nn.Module):
+    """非同步取樣的遞迴 step：每個 sensor 只在自己有觀測的那一步更新狀態。
+
+    carry = (h [K, d], last_t [K])；輸入 (x [K, d], t 純量, obs [K] bool)。Δt 取該 sensor 距上次觀測的時間
+    （尚未觀測過時 last_t=0，與 dts[0]=sensor_time[0] 的同步慣例一致）；沒有觀測的 sensor 沿用舊狀態。
+    內層 cell 與同步路徑相同（CfCStep 或 GRUDtStep），名稱固定為 'cell'。
+    """
+    temporal_cell: str
+    hidden_size: int
+    cell_kwargs: tuple = ()
+    torch_style_init: bool = False
+
+    @nn.compact
+    def __call__(self, carry, inp):
+        h, last_t = carry
+        x_t, t, obs = inp
+        step_cls = CfCStep if self.temporal_cell == "cfc" else GRUDtStep
+        cell = step_cls(hidden_size=self.hidden_size, torch_style_init=self.torch_style_init,
+                        name='cell', **dict(self.cell_kwargs))
+        cand, _ = cell(h, (x_t, t - last_t))
+        h_new = jnp.where(obs[:, None], cand, h)
+        last_new = jnp.where(obs, t, last_t)
+        return (h_new, last_new), h_new
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -511,6 +552,14 @@ class ModifiedMLPBlock(nn.Module):
         return (1.0 - h) * U + h * V
 
 
+def _attention_mask(key_mask: jnp.ndarray | None, pair_mask: jnp.ndarray | None) -> jnp.ndarray | None:
+    """合成 Flax attention mask [T, 1, K, K]（heads 維廣播）；兩者皆 None 時回傳 None（既有行為）。"""
+    if pair_mask is None:
+        return None if key_mask is None else key_mask[:, None, None, :]
+    mask = pair_mask[None, None, :, :]
+    return mask if key_mask is None else key_mask[:, None, None, :] & mask
+
+
 class TokenSelfAttentionBlock(nn.Module):
     """Token-level self attention + FFN，pre-norm 結構。
     對齊 pi_con/blocks.py:TokenSelfAttentionBlock（PyTorch nn.MultiheadAttention with batch_first）。
@@ -524,7 +573,10 @@ class TokenSelfAttentionBlock(nn.Module):
         return torch_linear_kernel_init if self.torch_style_init else nn.linear.default_kernel_init
 
     @nn.compact
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, key_mask: jnp.ndarray | None = None,
+                 pair_mask: jnp.ndarray | None = None) -> jnp.ndarray:
+        """key_mask：[T, K] bool，False 的 token 不被其他 token 讀取（非同步取樣下該幀沒有觀測的 sensor）。
+        pair_mask：[K, K] bool，token i 只讀 pair_mask[i] 為 True 的 token（空間分塊下只讀同一塊）。"""
         if self.d_model % self.num_heads != 0:
             raise ValueError(f"d_model={self.d_model} 必須能被 num_heads={self.num_heads} 整除")
         y = nn.LayerNorm()(x)
@@ -534,7 +586,7 @@ class TokenSelfAttentionBlock(nn.Module):
             num_heads=self.num_heads,
             qkv_features=self.d_model,
             out_features=self.d_model,
-        )(y, y, y)
+        )(y, y, y, mask=_attention_mask(key_mask, pair_mask))
         x = x + attn_out
         y2 = nn.LayerNorm()(x)
         ff = nn.Dense(2 * self.d_model, kernel_init=self._kinit)(y2)
@@ -638,12 +690,33 @@ class TemporalCfCEncoder(nn.Module):
     torch_style_init: bool = False
     # 遞迴 cell："cfc"（預設，PI-CON）或 "gru_dt"（GRUDtStep 對照臂；cfc_* 欄位對它不作用）
     temporal_cell: str = "cfc"
+    # scan 方向："forward"（預設）只往前，第 n 幀狀態只含 ≤n 的觀測；"bidirectional" 另跑一條
+    # 反向 scan 並逐層合併，第 n 幀狀態含整條序列。Why：間歇重建的誤差在 gap 內單調上升，
+    # 檢驗瓶頸是否是「看不到之後的資料」（knowledge/experiments/kolmogorov-cfc-isolation-2026-10.md）。
+    temporal_direction: str = "forward"
+    # 第一層也加殘差（seq = CfC 輸出 + 輸入 token）。預設 False＝既有行為：第一層 CfC 取代 token，
+    # 當下這一幀的資訊必須穿過閘門；True 時 CfC 是疊在直通路徑上的增量，B2 是它的特例。
+    cfc_residual: bool = False
+    # 輸出 [T, K, 4d] 的閉式解組成 [f1, f2, t_b, τ]，讓 decoder 在查詢時刻 t_q 重算
+    # g = σ(−τ·(Δt_n + t_q − t_n) + t_b)、h(t_q) = g·f1 + (1−g)·f2；t_q = t_n 時等於 h_n。
+    cfc_query_time: bool = False
+    # 非同步取樣：__call__ 收到 obs [T, K]；token attention 不讀沒有觀測的 token，遞迴只在有觀測時更新
+    async_sensors: bool = False
 
     @property
     def _kinit(self):
         return torch_linear_kernel_init if self.torch_style_init else nn.linear.default_kernel_init
 
     def setup(self):
+        if self.async_sensors and (self.temporal_direction != "forward" or self.cfc_query_time):
+            raise ValueError("async_sensors 只實作於前向、非閉式解的時間 encoder")
+        if self.temporal_direction not in ("forward", "bidirectional"):
+            raise ValueError(
+                f"temporal_direction 必須是 'forward' 或 'bidirectional'，收到 {self.temporal_direction!r}")
+        if self.cfc_query_time and not (
+                self.temporal_cell == "cfc" and self.num_layers == 1
+                and self.temporal_direction == "forward" and not self.cfc_residual):
+            raise ValueError("cfc_query_time 只實作於單層、前向、無殘差的 CfC")
         # Re FiLM modulation: attended = attended * (1 + scale(Re)) + shift(Re)
         # Why: Re 控制 NS 黏性／慣性比，作用在時空尺度上以「縮放」為主、平移為輔；
         #      純加法 bias 等同假設不同 Re 只是特徵平移，無法調控 CfC 時間常數。
@@ -680,10 +753,27 @@ class TemporalCfCEncoder(nn.Module):
                 input_dependent_tau=self.cfc_input_dependent_tau,
                 tau_mod_scale=self.cfc_tau_mod_scale,
             )
+            if self.cfc_query_time:
+                step_kwargs["emit_parts"] = True
         elif self.temporal_cell == "gru_dt":
             step_cls, step_kwargs = GRUDtStep, {}
         else:
             raise ValueError(f"temporal_cell 必須是 'cfc' 或 'gru_dt'，收到 {self.temporal_cell!r}")
+        if self.async_sensors:
+            ScannedAsync = nn.scan(
+                AsyncCellStep,
+                variable_broadcast='params',
+                split_rngs={'params': False},
+                in_axes=0,
+                out_axes=0,
+            )
+            self.cells = [
+                ScannedAsync(temporal_cell=self.temporal_cell, hidden_size=self.d_model,
+                             cell_kwargs=tuple(step_kwargs.items()),
+                             torch_style_init=self.torch_style_init, name=f'cell_{i}')
+                for i in range(self.num_layers)
+            ]
+            return
         ScannedCellFwd = nn.scan(
             step_cls,
             variable_broadcast='params',
@@ -701,13 +791,41 @@ class TemporalCfCEncoder(nn.Module):
             )
             for i in range(self.num_layers)
         ]
+        if self.temporal_direction == "bidirectional":
+            # 反向 scan：lax.scan(reverse=True) 的輸出仍按原時間索引排列，第 n 個輸出只含 ≥n 的幀。
+            ScannedCellBwd = nn.scan(
+                step_cls,
+                variable_broadcast='params',
+                split_rngs={'params': False},
+                in_axes=0,
+                out_axes=0,
+                reverse=True,
+            )
+            self.cells_bwd = [
+                ScannedCellBwd(
+                    hidden_size=self.d_model,
+                    torch_style_init=self.torch_style_init,
+                    name=f'cell_{i}_bwd',
+                    **step_kwargs,
+                )
+                for i in range(self.num_layers)
+            ]
+            # 兩個方向的狀態 concat 後投影回 d_model，下游介面不變
+            self.dir_merge = [
+                nn.Dense(self.d_model, name=f'dir_merge_{i}', kernel_init=self._kinit)
+                for i in range(self.num_layers)
+            ]
 
     def __call__(
         self,
         spatial_states: jnp.ndarray,  # [T, K, d_model]
         re_norm: float,
         sensor_time: jnp.ndarray,     # [T]
+        obs: jnp.ndarray | None = None,  # [T, K] bool；僅 async_sensors
+        token_block: jnp.ndarray | None = None,  # [K] int；空間分塊時各 token 所屬的塊，attention 只讀同塊
     ) -> jnp.ndarray:
+        if self.async_sensors != (obs is not None):
+            raise ValueError("async_sensors 與 obs 必須同時提供或同時缺席")
         # dts[0] = sensor_time[0]; dts[t>0] = sensor_time[t] - sensor_time[t-1]
         dts = jnp.concatenate([sensor_time[:1], jnp.diff(sensor_time)])  # [T]
 
@@ -720,8 +838,19 @@ class TemporalCfCEncoder(nn.Module):
         # 修 Bug：原先邏輯把 token_block 綁 num_layers (CfC count)，導致
         # num_token_attention_layers=2 + num_layers=1 時 token_block_1 從未被 call →
         # Flax 不 init 它的 params，少 ~525k 參數量（與 pi-lnn 不一致的 root cause）。
+        # 某幀完全沒有觀測時 softmax 會全遮成 NaN；attention 那一幀退回不遮（資料生成端已保證每幀至少一個觀測）。
+        # 遞迴的更新仍只看真正的 obs。
+        # 空間分塊時「沒有觀測」逐塊判斷：某塊該幀全無觀測時，該塊退回讀同塊全部 token。
+        pair_mask = None if token_block is None else token_block[:, None] == token_block[None, :]
+        if obs is None:
+            attn_mask = None
+        elif pair_mask is None:
+            attn_mask = obs | ~jnp.any(obs, axis=1, keepdims=True)
+        else:
+            attn_mask = obs | ~((obs.astype(jnp.float32) @ pair_mask.astype(jnp.float32)) > 0)
         for block in self.token_blocks:
-            seq = block(seq)
+            seq = (block(seq) if attn_mask is None and pair_mask is None
+                   else block(seq, key_mask=attn_mask, pair_mask=pair_mask))
         if not self.cells:
             # num_layers=0：cell loop 不跑 → FiLM 不會被套用，模型會 Re-blind 且 re_scale/
             # re_shift 變 dead param。在此對 token-attended 序列套一次 FiLM，保證 Re-aware。
@@ -734,10 +863,23 @@ class TemporalCfCEncoder(nn.Module):
             # nn.scan CfC：carry=h [K, d_model]，input=(x_t [K, d_model], dt_t scalar)
             K = attended.shape[1]
             h_init = jnp.zeros((K, self.d_model), dtype=attended.dtype)
+            if obs is not None:
+                carry0 = (h_init, jnp.zeros((K,), dtype=sensor_time.dtype))
+                _, outputs = cell(carry0, (attended, sensor_time, obs))
+                seq = outputs + seq if (layer_idx > 0 or self.cfc_residual) else outputs
+                continue
             _, fwd_out = cell(h_init, (attended, dts))
-            outputs = fwd_out
-            # 層間殘差：第二層起加上前一層輸出
-            seq = outputs + seq if layer_idx > 0 else outputs
+            if self.temporal_direction == "bidirectional":
+                # 反向的 Δt 是到下一幀的間隔；最後一幀之後沒有幀，取 0
+                dts_bwd = jnp.concatenate([jnp.diff(sensor_time), jnp.zeros_like(sensor_time[:1])])
+                _, bwd_out = self.cells_bwd[layer_idx](h_init, (attended, dts_bwd))
+                outputs = self.dir_merge[layer_idx](jnp.concatenate([fwd_out, bwd_out], axis=-1))
+            else:
+                outputs = fwd_out
+            if self.cfc_query_time:
+                return outputs                                       # [T, K, 4d] 閉式解組成
+            # 層間殘差：第二層起加上前一層輸出（cfc_residual 時第一層也加）
+            seq = outputs + seq if (layer_idx > 0 or self.cfc_residual) else outputs
         return seq
 
 
@@ -820,6 +962,18 @@ class DeepONetCfCDecoder(nn.Module):
     use_rwf: bool = False
     rwf_mean: float = 1.0
     rwf_stddev: float = 0.1
+    # cross-attention 讀哪些幀："latest"（預設）只讀 ≤t_q 的最後一幀；"bracket" 同時讀它與下一幀
+    # （2K 個 token，各加上相對 t_q 的時間偏移嵌入；不存在的那一幀遮掉）。trunk 不變。
+    # Why：檢驗 gap 內誤差單調上升是否來自看不到 gap 後的那一幀。
+    decoder_frame_context: str = "latest"
+    # h_states 為 [T, K, 4d] 的 CfC 閉式解組成，branch 狀態在查詢時刻重算（見 TemporalCfCEncoder）
+    cfc_query_time: bool = False
+    # False：trunk 的 elapsed-time 輸入恆為 0（time_proj 只剩 bias），時間資訊只能來自 branch 與 anchor
+    trunk_elapsed_time: bool = True
+    # h_states 最後一個通道是 token 是否帶資訊（非同步取樣）；cross-attention 遮掉不帶資訊的 token
+    async_sensors: bool = False
+    # 空間分塊（>1 時切成 n×n 塊）：trunk 只看塊內局部座標，cross-attention 只讀同塊 sensor。見 LiquidOperator。
+    spatial_blocks: int = 1
 
     @property
     def _kinit(self):
@@ -938,6 +1092,29 @@ class DeepONetCfCDecoder(nn.Module):
         self.branch_query_proj = nn.Dense(self.query_mlp_hidden_dim, name='branch_query_proj', kernel_init=self._kinit)
         self.branch_key_proj = nn.Dense(self.query_mlp_hidden_dim, name='branch_key_proj', kernel_init=self._kinit)
         self.branch_value_proj = nn.Dense(self.query_mlp_hidden_dim, name='branch_value_proj', kernel_init=self._kinit)
+        if self.decoder_frame_context not in ("latest", "bracket"):
+            raise ValueError(
+                f"decoder_frame_context 必須是 'latest' 或 'bracket'，收到 {self.decoder_frame_context!r}")
+        if self.async_sensors and (self.cfc_query_time or self.decoder_frame_context != "latest"
+                                   or self.mmlp_branch_u or self.attention_kind != "scalar"
+                                   or self.disable_cross_attention):
+            raise ValueError("async_sensors 只實作於 scalar cross-attention、latest 讀幀、無閉式解的 decoder")
+        if self.spatial_blocks > 1 and (self.cfc_query_time or self.decoder_frame_context != "latest"
+                                        or self.mmlp_branch_u or self.attention_kind != "scalar"
+                                        or self.disable_cross_attention or self.use_sdf_features
+                                        or not self.periodic_domain):
+            raise ValueError("spatial_blocks 只實作於週期域、scalar cross-attention、latest 讀幀、無閉式解／SDF 的 decoder")
+        if self.cfc_query_time and (self.decoder_frame_context != "latest" or self.mmlp_branch_u):
+            raise ValueError("cfc_query_time 不得與 decoder_frame_context='bracket' 或 mmlp_branch_u 同時使用")
+        if self.decoder_frame_context == "bracket":
+            if (self.attention_kind != "scalar" or self.disable_cross_attention
+                    or self.use_sdf_features or self.mmlp_branch_u):
+                raise ValueError(
+                    "decoder_frame_context='bracket' 只實作於 scalar cross-attention、無 SDF、"
+                    "無 mmlp_branch_u 的組合")
+            # 輸入 [Δ, 1_next]：Δ = t_frame − t_q（前一幀 ≤0、下一幀 ≥0），指示量區分兩幀
+            self.frame_offset_proj = nn.Dense(
+                self.query_mlp_hidden_dim, name='frame_offset_proj', kernel_init=self._kinit)
         # relpos_bias: [LN] → Dense(hidden) → SiLU → Dense(1)（scalar attention 用）
         if self.relpos_bias_norm not in ("layernorm", "none"):
             raise ValueError(
@@ -1020,16 +1197,24 @@ class DeepONetCfCDecoder(nn.Module):
         idx = jnp.clip(idx, 0, h_states.shape[0] - 1)
         dt_to_query = jnp.clip(t_q - sensor_time[idx], min=0.0)  # [N]
 
-        pos_enc = self.spatial_emb(xy, self.domain_length)
+        # 空間分塊：trunk 的座標換成塊內局部座標（分不出是哪一塊），cross-attention 只讀同塊 sensor
+        block_mask = None
+        xy_trunk = xy
+        if self.spatial_blocks > 1:
+            xy_trunk, q_blk = block_split(xy, self.spatial_blocks, self.domain_length)
+            _, s_blk = block_split(sensor_pos, self.spatial_blocks, self.domain_length)
+            block_mask = q_blk[:, None] == s_blk[None, :]                  # [N, K]
+        pos_enc = self.spatial_emb(xy_trunk, self.domain_length)
         # 方向1: opt-in concat band-targeted mid-band embedding（flag 關時此分支不存在）
         if self.mid_band_wavenumbers:
             pos_enc = jnp.concatenate(
-                [pos_enc, self.band_spatial_emb(xy, self.domain_length)], axis=-1)
+                [pos_enc, self.band_spatial_emb(xy_trunk, self.domain_length)], axis=-1)
         # 方向1 exp_508: opt-in concat trainable-frequency embedding（同上，關時不存在）
         if self.use_trainable_fourier:
             pos_enc = jnp.concatenate(
-                [pos_enc, self.trainable_spatial_emb(xy, self.domain_length)], axis=-1)
-        time_e = self.time_proj(dt_to_query[:, None])  # [N, d_time]
+                [pos_enc, self.trainable_spatial_emb(xy_trunk, self.domain_length)], axis=-1)
+        time_e = self.time_proj(
+            (dt_to_query if self.trunk_elapsed_time else jnp.zeros_like(dt_to_query))[:, None])  # [N, d_time]
 
         # #3 解析 SDF（到圓形 body 的 signed distance；可微 → fof 二階導正確）
         if self.use_sdf_features:
@@ -1046,9 +1231,51 @@ class DeepONetCfCDecoder(nn.Module):
         # 參數梯度差 ~1e-6——gather 的 adjoint 是 scatter-add，把線性算子搬到 gather 另一側
         # 會重組梯度的加總順序，而浮點加法不結合。因此**永遠過不了 §7.1 對拍**，那是這個
         # 寫法的固有性質，不是可修的 bug。
-        branch_tokens_all = self.branch_token_proj(h_states)           # [T, K, hidden]
-        k_proj = self.branch_key_proj(branch_tokens_all)[idx]          # [N, K, hidden]
-        v_proj = self.branch_value_proj(branch_tokens_all)[idx]        # [N, K, hidden]
+        frame_mask = None
+        if self.async_sensors:
+            # 最後一個通道是 token 是否帶資訊；不帶資訊的 token 不進 softmax
+            frame_mask = h_states[idx, :, -1] > 0.5                       # [N, K]
+            h_states = h_states[..., :-1]
+        branch_tokens_all = None if self.cfc_query_time else self.branch_token_proj(h_states)  # [T, K, hidden]
+        if self.cfc_query_time:
+            # 閉式解：branch 狀態隨 t_q 連續變化，投影無法提到 gather 之前（閘門逐通道依 t_q 而變）
+            if h_states.shape[-1] != 4 * self.d_model:
+                raise ValueError(f"cfc_query_time 需要 [T, K, 4·d_model] 的 h_states，收到 {h_states.shape}")
+            f1, f2, t_b, tau = jnp.split(h_states, 4, axis=-1)
+            dts = jnp.concatenate([sensor_time[:1], jnp.diff(sensor_time)])
+            delta = dts[idx] + dt_to_query                                 # [N]；t_q = t_n 時等於該幀的 Δt
+            g_q = jax.nn.sigmoid(-tau[idx] * delta[:, None, None] + t_b[idx])
+            h_q = g_q * f1[idx] + (1.0 - g_q) * f2[idx]                    # [N, K, d]
+            branch_tokens_q = self.branch_token_proj(h_q)
+            k_proj = self.branch_key_proj(branch_tokens_q)
+            v_proj = self.branch_value_proj(branch_tokens_q)
+        elif self.decoder_frame_context == "bracket":
+            # 前一幀＝最後一個 ≤t_q 的幀（t_q<t_1 時不存在）；下一幀＝第一個 >t_q 的幀（t_q≥t_T 時不存在）
+            T_s, K_tok = h_states.shape[0], h_states.shape[1]
+            n_le = jnp.sum(sensor_time[None, :] <= t_q[:, None], axis=1).astype(jnp.int32)
+            idx_next = jnp.clip(n_le, 0, T_s - 1)
+            has_prev, has_next = n_le > 0, n_le < T_s
+            dt_next = jnp.clip(sensor_time[idx_next] - t_q, min=0.0)
+            off_prev = self.frame_offset_proj(
+                jnp.stack([-dt_to_query, jnp.zeros_like(dt_to_query)], axis=-1))   # [N, hidden]
+            off_next = self.frame_offset_proj(
+                jnp.stack([dt_next, jnp.ones_like(dt_next)], axis=-1))
+            k_all = self.branch_key_proj(branch_tokens_all)
+            v_all = self.branch_value_proj(branch_tokens_all)
+            k_proj = jnp.concatenate([k_all[idx] + off_prev[:, None], k_all[idx_next] + off_next[:, None]],
+                                     axis=1)                           # [N, 2K, hidden]
+            v_proj = jnp.concatenate([v_all[idx] + off_prev[:, None], v_all[idx_next] + off_next[:, None]],
+                                     axis=1)
+            frame_mask = jnp.concatenate([
+                jnp.broadcast_to(has_prev[:, None], (t_q.shape[0], K_tok)),
+                jnp.broadcast_to(has_next[:, None], (t_q.shape[0], K_tok))], axis=1)   # [N, 2K]
+        else:
+            k_proj = self.branch_key_proj(branch_tokens_all)[idx]      # [N, K, hidden]
+            v_proj = self.branch_value_proj(branch_tokens_all)[idx]    # [N, K, hidden]
+        if block_mask is not None:
+            # 該塊在這一幀沒有帶資訊的 token 時，退回讀同塊全部 token（不跨塊）
+            m = block_mask if frame_mask is None else frame_mask & block_mask
+            frame_mask = jnp.where(jnp.any(m, axis=1, keepdims=True), m, block_mask)
 
         # rel coord：query→sensor 位移
         rel = xy[:, None, :] - sensor_pos[None, :, :]                  # [N, K, 2]
@@ -1058,8 +1285,10 @@ class DeepONetCfCDecoder(nn.Module):
         # 不變，該 fallback 對這顆 [N,K,2] round 的成本可忽略。故不為此改動（保持單行清晰）。
         if self.periodic_domain:
             rel = rel - jnp.round(rel / self.domain_length) * self.domain_length
-        rel_r = jnp.sqrt(jnp.sum(rel ** 2, axis=-1, keepdims=True) + 1e-8)  # [N, K, 1]
-        N_q, K_s = xy.shape[0], sensor_pos.shape[0]
+        if self.decoder_frame_context == "bracket":
+            rel = jnp.concatenate([rel, rel], axis=1)                  # 兩幀的 sensor 位置相同
+        rel_r = jnp.sqrt(jnp.sum(rel ** 2, axis=-1, keepdims=True) + 1e-8)  # [N, K(或 2K), 1]
+        N_q, K_s = xy.shape[0], rel.shape[1]
         # #1 relpos bias 輸入：radial(各向同性,現行) 或 vector(含方向 → 各向異性)
         bias_parts = []
         if self.relpos_bias_mode == "vector":
@@ -1157,6 +1386,9 @@ class DeepONetCfCDecoder(nn.Module):
             if self.use_locality_decay:
                 decay_rate = jnp.exp(self.log_locality_decay)           # α > 0
                 scores = scores - decay_rate * rel_r_3.squeeze(-1)[:, None, :]
+            if frame_mask is not None:
+                # 不存在的那一幀不參與 softmax（兩幀不會同時不存在）
+                scores = jnp.where(_repeat3(frame_mask)[:, None, :], scores, -1e9)
             attn = jax.nn.softmax(scores, axis=-1)
             branch_ctx_h = jnp.einsum("nhk,nkhd->nhd", attn, v_h)
             _ctx = branch_ctx_h.reshape(3 * N, H * D)
@@ -1250,6 +1482,23 @@ class LiquidOperator(nn.Module):
     cfc_tau_mod_scale: float = 0.5
     # 見 TemporalCfCEncoder 同名欄位；"gru_dt" 是 CfC 獨立貢獻的對照臂
     temporal_cell: str = "cfc"
+    # 見 TemporalCfCEncoder.temporal_direction 與 DeepONetCfCDecoder.decoder_frame_context
+    temporal_direction: str = "forward"
+    decoder_frame_context: str = "latest"
+    # 見 TemporalCfCEncoder.cfc_residual／cfc_query_time 與 DeepONetCfCDecoder.trunk_elapsed_time
+    cfc_residual: bool = False
+    cfc_query_time: bool = False
+    trunk_elapsed_time: bool = True
+    # 非同步取樣：sensor_vals 中 NaN 表示該 (幀, sensor) 沒有觀測。encode 把它補 0、交給時間 encoder 的 obs，
+    # 並在 h_states 末端附一個通道標記 token 是否帶資訊（遞迴臂：到該幀為止觀測過；B2：該幀有觀測）。
+    async_sensors: bool = False
+    # 零階保持對照（設計重測 E5c）：僅 async_sensors 且無遞迴（B2）時可開。每個 sensor 沿用最後一次觀測值當作當幀
+    # 輸入（不帶觀測距今多久），區分「保留舊觀測」與「時間架構」的貢獻。監督仍只用真實觀測。
+    async_hold: bool = False
+    # 空間分塊、多 case 訓練（knowledge/experiments/kolmogorov-cfc-design-retest-2026-10.md E6）：>1 時 domain 切成
+    # n×n 塊，每塊只用自己的 sensor、trunk 只看塊內局部座標，同一個網路同時擬合 n² 個 case。1＝既有行為。
+    # 前提：forcing 對塊大小平移不變（(domain_length/n)·k_f 為整數），否則各塊的方程不同。
+    spatial_blocks: int = 1
     use_modified_mlp: bool = False
     use_locality_decay: bool = False
     disable_cross_attention: bool = False
@@ -1322,6 +1571,10 @@ class LiquidOperator(nn.Module):
             cfc_tau_mod_scale=self.cfc_tau_mod_scale,
             torch_style_init=self.torch_style_init,
             temporal_cell=self.temporal_cell,
+            temporal_direction=self.temporal_direction,
+            cfc_residual=self.cfc_residual,
+            cfc_query_time=self.cfc_query_time,
+            async_sensors=self.async_sensors,
         )
         # decoder class：若啟 use_decoder_remat，套 nn.remat lifted transform
         # 對二階 autograd 用 forward-recompute 換 activation memory（peak ↓ 30-40%）
@@ -1369,7 +1622,20 @@ class LiquidOperator(nn.Module):
             use_rwf=self.use_rwf,
             rwf_mean=self.rwf_mean,
             rwf_stddev=self.rwf_stddev,
+            decoder_frame_context=self.decoder_frame_context,
+            cfc_query_time=self.cfc_query_time,
+            trunk_elapsed_time=self.trunk_elapsed_time,
+            async_sensors=self.async_sensors,
+            spatial_blocks=self.spatial_blocks,
         )
+        if self.async_hold and not (self.async_sensors and self.num_temporal_cfc_layers == 0):
+            raise ValueError("async_hold 只用於 async_sensors=true 且 num_temporal_cfc_layers=0（B2）的對照")
+        if self.spatial_blocks > 1:
+            shift = self.domain_length / self.spatial_blocks * self.forcing_k_f_init
+            if self.learn_forcing_k_f or abs(shift - round(shift)) > 1e-9:
+                raise ValueError(
+                    f"spatial_blocks={self.spatial_blocks} 需要 forcing 對塊大小平移不變：(L/n)·k_f={shift} 不是整數"
+                    "（或 k_f 可學）")
         # ForcingPrior submodule（params 自動納入 model state_dict）
         self.forcing = ForcingPrior(
             A_init=self.forcing_A_init,
@@ -1391,10 +1657,25 @@ class LiquidOperator(nn.Module):
         re_norm: float,
         sensor_time: jnp.ndarray,
     ) -> jnp.ndarray:
+        token_block = None
+        if self.spatial_blocks > 1:
+            sensor_pos, token_block = block_split(sensor_pos, self.spatial_blocks, self.domain_length)
         pos_enc = self.spatial_encoder.encode_pos(sensor_pos)
-        spatial_states = self.spatial_encoder(sensor_vals, pos_enc)  # [T, K, d_model]
-        h_states = self.temporal_encoder(spatial_states, re_norm, sensor_time)
-        return h_states
+        if not self.async_sensors:
+            spatial_states = self.spatial_encoder(sensor_vals, pos_enc)  # [T, K, d_model]
+            if token_block is None:
+                return self.temporal_encoder(spatial_states, re_norm, sensor_time)
+            return self.temporal_encoder(spatial_states, re_norm, sensor_time, token_block=token_block)
+        obs = jnp.all(jnp.isfinite(sensor_vals), axis=-1)                # [T, K]
+        vals = jnp.where(obs[..., None], sensor_vals, 0.0)
+        if self.async_hold:
+            last = jax.lax.cummax(jnp.where(obs, jnp.arange(obs.shape[0])[:, None], -1), axis=0)  # [T, K] 最後觀測幀
+            vals = jnp.take_along_axis(vals, jnp.maximum(last, 0)[..., None], axis=0)
+            obs = last >= 0
+        spatial_states = self.spatial_encoder(vals, pos_enc)
+        h = self.temporal_encoder(spatial_states, re_norm, sensor_time, obs=obs, token_block=token_block)
+        valid = (jnp.cumsum(obs, axis=0) > 0) if self.num_temporal_cfc_layers > 0 else obs
+        return jnp.concatenate([h, valid[..., None].astype(h.dtype)], axis=-1)
 
     def decode_query(
         self,

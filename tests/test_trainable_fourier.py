@@ -205,7 +205,6 @@ def test_diag_script_uses_the_real_sensor_loader_keys():
     py_compile 與 ruff 都抓不到——它只在 lab-server 實跑時才 KeyError（大聲失敗，
     但已經浪費一輪往返）。本條用真實 loader 把契約釘在本機。
     """
-    import os
     import re
     from pathlib import Path
 

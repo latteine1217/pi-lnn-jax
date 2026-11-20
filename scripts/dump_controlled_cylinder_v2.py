@@ -59,7 +59,7 @@ def main():
         sensor_npz=f"{a.sensor_dir}/{a.sensor_stem}_values.npz",
         arrow_shard=a.arrow, re_value=re_val, sensor_subsample=20,
     )
-    f = load_arrow_fields(a.arrow); T,H,W = f["T"],f["H"],f["W"]
+    f = load_arrow_fields(a.arrow); T = f["T"]
     xlo,xhi,ylo,yhi = ds.x_lo,ds.x_hi,ds.y_lo,ds.y_hi
     Lx_, Ly_ = float(ds.Lx), float(ds.Ly)
     dns_x = ((f["x"][0,:]-xlo)/(xhi-xlo)).astype(np.float32)

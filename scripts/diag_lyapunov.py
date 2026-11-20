@@ -317,7 +317,7 @@ def fidelity_gate(step, ctx, dns_omega, dns_time, dns_u, dns_v, idx, dt, horizon
     """Gate 3: integrate from a DNS snapshot and check the solver tracks the
     DNS trajectory at short time (same dynamical system) and reproduces the
     steady-state energy spectrum. Returns dict of diagnostics."""
-    kx, ky, inv_ksq, N = ctx["kx"], ctx["ky"], ctx["inv_ksq"], ctx["N"]
+    kx, ky, inv_ksq = ctx["kx"], ctx["ky"], ctx["inv_ksq"]
     what = jnp.fft.fft2(jnp.asarray(dns_omega[idx])) * ctx["mask"]
     dt_save = float(dns_time[1] - dns_time[0])
     steps_per_save = int(round(dt_save / dt))

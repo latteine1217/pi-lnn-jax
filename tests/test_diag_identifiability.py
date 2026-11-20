@@ -20,7 +20,6 @@ from scripts.diag_identifiability import (
     reconstruct_uv_rel_l2,
     sensor_band_edge,
     velocity_band_rel_l2,
-    _per_frame_rel_l2,
     _per_frame_vec_rel_l2,
 )
 

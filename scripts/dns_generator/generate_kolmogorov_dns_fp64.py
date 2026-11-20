@@ -16,8 +16,7 @@ Kolmogorov Flow DNS 資料生成器 (統一版本)
 import numpy as np
 import argparse
 from pathlib import Path
-import sys
-from typing import Dict, Tuple, Optional
+from typing import Tuple, Optional
 import logging
 import time
 import math
@@ -49,19 +48,19 @@ def select_backend() -> Tuple[str, Optional[object]]:
     # 優先 MPS (Apple Metal)
     if torch.backends.mps.is_available():
         device = torch.device('mps')
-        logging.info(f"🚀 使用 PyTorch + MPS (Apple Metal GPU)")
+        logging.info("🚀 使用 PyTorch + MPS (Apple Metal GPU)")
         return 'torch-mps', device
     
     # 次選 CUDA (NVIDIA)
     if torch.cuda.is_available():
         device = torch.device('cuda')
-        logging.info(f"🚀 使用 PyTorch + CUDA (NVIDIA GPU)")
+        logging.info("🚀 使用 PyTorch + CUDA (NVIDIA GPU)")
         return 'torch-cuda', device
     
     # CPU PyTorch
     if TORCH_AVAILABLE:
         device = torch.device('cpu')
-        logging.info(f"🔧 使用 PyTorch (CPU)")
+        logging.info("🔧 使用 PyTorch (CPU)")
         return 'torch-cpu', device
     
     # 回退到 NumPy

@@ -17,7 +17,6 @@ import pathlib
 import sys
 
 import jax.numpy as jnp
-import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "scripts"))
 from evaluate_exp245 import _find_schedule_free_state  # noqa: E402

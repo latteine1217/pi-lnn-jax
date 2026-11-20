@@ -153,3 +153,55 @@ def test_collo2x_arm_differs_from_530_only_in_density():
     }
     assert diff == {"n_collo_start", "n_collo_end"}, f"curriculum 多出非預期差異：{diff}"
     print("✓ collo2x_arm_differs_from_530_only_in_density")
+
+
+@pytest.mark.parametrize('chunks', [1, 4])
+def test_terminal_state_gets_physics_points_without_changing_random_samples(chunks):
+    """每個梯度分塊包含終點，原有隨機點及 RNG stream 保持不變。"""
+    config = resolve_inputs(['--config', _CONFIG]).config
+    config = _with(config, grad_accum_chunks=chunks)
+    plan = _plan(config)
+    n = config.curriculum.n_collo_start
+    assert plan.n_collo_now == n + chunks
+    times = np.asarray(plan.ct).reshape(chunks, -1)
+    assert np.all(times[:, -1] == DATA_T_MAX)
+    key, sub = jax.random.split(jax.random.PRNGKey(0))
+    keys = jax.random.split(sub, 3)
+    for values, sample_key, upper in [(plan.cx, keys[0], 1.0),
+                                       (plan.cy, keys[1], 1.0),
+                                       (plan.ct, keys[2], DATA_T_MAX)]:
+        expected = jax.random.uniform(sample_key, (n,), minval=0.0, maxval=upper)
+        np.testing.assert_array_equal(np.asarray(values).reshape(chunks, -1)[:, :-1].ravel(), expected)
+    np.testing.assert_array_equal(plan.rng_collo, key)
+
+
+def test_endpoint_respects_curriculum_and_extended_physics_window():
+    """暖身不越過時窗；外推時仍直接約束資料末端的狀態切換。"""
+    config = resolve_inputs(['--config', _CONFIG]).config
+    warmup = _plan(_with(config, use_time_marching=True, tm_start_frac=0.5,
+                         tm_warmup_steps=10, tm_ramp_steps=100))
+    assert float(warmup.ct[-1]) == warmup.t_upper == 2.5
+    extended = _plan(_with(config, physics_t_max=10.0))
+    assert float(extended.ct[-1]) == DATA_T_MAX
+    assert bool(jnp.any(extended.ct > DATA_T_MAX))
+
+
+def test_rar_also_keeps_terminal_physics_points(monkeypatch):
+    """RAR 重選點不能再次漏掉最後狀態，且每塊均包含終點。"""
+    from pi_lnn_jax.pipeline.kolmogorov import run
+
+    config = resolve_inputs(['--config', _CONFIG]).config
+    config = _with(config, grad_accum_chunks=4, rar_freq=1, rar_warmup=0)
+
+    def sample(*args, n_select, **kwargs):
+        values = jnp.full((n_select,), 0.25)
+        return values, values, values, 'rar-state'
+
+    monkeypatch.setattr(run, 'rar_sample', sample)
+    plan = _plan(config)
+    assert plan.rar_triggered
+    assert plan.rar_state == 'rar-state'
+    times = np.asarray(plan.ct).reshape(4, -1)
+    assert np.all(times[:, :-1] == 0.25)
+    assert np.all(times[:, -1] == DATA_T_MAX)
+    assert plan.n_collo_now == config.curriculum.n_collo_start + 4

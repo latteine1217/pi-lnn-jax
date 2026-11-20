@@ -46,7 +46,7 @@ Implementation: [`pi_lnn_jax/models.py`](pi_lnn_jax/models.py) (architecture),
 | [`pi_lnn_jax/pipeline/`](pi_lnn_jax/pipeline/) | Per-case training chains (Kolmogorov / cylinder); start at each case's `__init__.py` |
 | [`configs/`](configs/) | Experiment configs — see [`configs/README.md`](configs/README.md) |
 | [`scripts/`](scripts/) | Evaluation, diagnostics, plotting, Slurm submission — see [`scripts/README.md`](scripts/README.md) |
-| [`tests/`](tests/) | 126 test files |
+| [`tests/`](tests/) | 145 test files |
 | [`docs/adr/`](docs/adr/) | Architecture decision records |
 | [`GLOSSARY.md`](GLOSSARY.md) | Domain vocabulary for evaluation artifacts and configuration |
 
@@ -67,9 +67,10 @@ a plain `uv sync` stays portable; install them separately:
 scripts/slurm/setup_gpu_venv.sh
 ```
 
-Unit tests:
+Lint and unit tests:
 
 ```bash
+uv run ruff check .                              # syntax errors + pyflakes (see pyproject.toml)
 PYTHONPATH=. uv run python -m pytest tests/ -q
 ```
 
@@ -100,6 +101,14 @@ Sensor files for the Kolmogorov case are version-controlled under
 located at runtime via `PILNJAX_DATA_ROOT`. See [`.gitignore`](.gitignore) for
 what is excluded and [`scripts/README.md`](scripts/README.md) for the generation
 scripts.
+
+## Changes since v0.1.0
+
+Kolmogorov training now adds one data-endpoint collocation point per gradient
+accumulation chunk, alongside the random physics points; during time marching
+this point is capped at the current time ceiling. This closes a terminal-state
+collocation gap, and it means a v0.2.0 run does not reproduce a v0.1.0 run
+bit-for-bit with the same config and seed.
 
 ## Notes on this repository
 

@@ -123,7 +123,7 @@ def main() -> int:
     print(f"\n=== {a.config}  step {int(state.step)} ===")
     print(f"  形狀：h_states [T={T}, K={K}, d={dm}]   N={N}   hidden={hid}")
     print(f"  列數：現行 N·K = {N*K:,}   提升後 T·K = {T*K:,}   倍率 {N/T:.1f}×")
-    print(f"\n--- 1. 值是否相同 ---")
+    print("\n--- 1. 值是否相同 ---")
     print(f"  逐位元相同：k={same_k}  v={same_v}")
     print(f"  max|Δ|：k={dk_max:.3e}  v={dv_max:.3e}   相對 {rel:.3e}")
     print(f"\n--- 2. 時間（{a.reps} 次中位數）---")

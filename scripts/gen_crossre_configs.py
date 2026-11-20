@@ -135,7 +135,7 @@ def render_config(base_text: str, spec: dict, k: int) -> str:
            f"故降為 0 = 全取。\n"
            if nsq == 0 else
            f"# 大於 base 的 {base_nsq}，維持 base 設定。\n")
-        + f"# 手改本檔會在下次生成時被覆蓋——要改請改生成器。\n"
+        + "# 手改本檔會在下次生成時被覆蓋——要改請改生成器。\n"
     )
     text = base_text
     text = _replace_field(

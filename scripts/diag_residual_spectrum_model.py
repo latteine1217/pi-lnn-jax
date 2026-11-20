@@ -43,7 +43,7 @@ from pi_lnn_jax.evaluation_protocol import (  # noqa: E402
     ProtocolMode, load_for_evaluation, resolve_protocol,
     training_time_strides_from_config,
 )
-from pi_lnn_jax.data import _resolve_data_path, load_sensors_from_path  # noqa: E402
+from pi_lnn_jax.data import _resolve_data_path  # noqa: E402
 from pi_lnn_jax.metric_artifact import spectral_coherence  # noqa: E402
 from pi_lnn_jax.model_factory import build_model  # noqa: E402
 
@@ -142,7 +142,6 @@ def main() -> int:
     print(f"[protocol] {protocol.mode.value}  sensor_stride={protocol.sensor_time_stride} "
           f"dns_stride={protocol.dns_time_stride}  {protocol.basis}")
 
-    probe = load_sensors_from_path(sensor_json[0], time_stride=protocol.sensor_time_stride)
     aligned = load_for_evaluation(sensor_json[0], Path(dns_paths[0]), protocol=protocol,
                                   viscosity=nu, with_pressure=False)
     sensor_vals, sensor_pos = aligned.sensor_vals_normalized, aligned.sensor_pos

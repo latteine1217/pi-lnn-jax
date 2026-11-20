@@ -48,6 +48,22 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# What: ruff 只開語法錯誤（E9）與 pyflakes（F）；.claude/hooks/check.sh 在 Stop hook 以此擋交付。
+# Why: 不設定時 ruff 0.16 的預設規則在既有程式碼上報 793 項，多為風格；全修會產生大量
+#      與需求無關的 diff。E9/F 對應真錯誤（未定義名稱、未使用的 import/變數）。
+#      knowledge/、archive/、paper/、slides/ 不是程式碼庫本體，不納入。
+[tool.ruff]
+extend-exclude = ["knowledge", "archive", "paper", "slides"]
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# evaluate.py 從 metric_artifact 匯入的名稱是對外 re-export（tests 與 pipeline 由此 import），
+# `ruff --fix` 會刪掉它們而弄壞呼叫端。evaluate 也是 CLAUDE.md §7.1 的共用 leaf module，
+# 改其內容會讓 A/B 對拍報假紅，因此在設定層豁免，不動程式碼。
+"pi_lnn_jax/evaluate.py" = ["F401"]
+
 # soap-jax 為 git 直接引用依賴；hatchling 需顯式允許 direct references。
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -122,6 +122,13 @@ def _make_re_batch(dataset: dict, dtype: Any = jnp.float32,
     if e != 1 or t != 1:
         enc_vals, enc_time = vals[::e], time[::e]
         vals, time = vals[::t], time[::t]
+    if "sup_vals" in dataset:
+        # oracle 監督：encoder 吃載入的序列，監督目標換成完整序列（_attach_supervision 已驗過對齊）
+        if e != 1 or t != 1:
+            raise ValueError("supervision_sensor_json 不得與 encoder/target_time_stride≠1 同時使用")
+        enc_vals, enc_time = vals, time
+        vals = jnp.asarray(dataset["sup_vals"], dtype=dtype)
+        time = jnp.asarray(dataset["sup_time"], dtype=dtype)
     return ReBatch(
         sensor_vals=vals,
         sensor_pos=jnp.asarray(dataset["sensor_pos"], dtype=dtype),
@@ -139,6 +146,42 @@ def _make_re_batch(dataset: dict, dtype: Any = jnp.float32,
     )
 
 
+def _attach_supervision(dataset: dict, supervision_json: str) -> dict:
+    """oracle 監督（診斷用）：載入完整時間序列，當作監督目標附在 dataset 上。
+
+    encoder 仍吃 `sensor_jsons[0]`（例如間歇保留幀）；這裡的完整序列以**它的** norm_stats
+    正規化，所以 encoder 輸入、eval 的反正規化常數與不開 oracle 時完全相同。完整檔的 stride
+    取自 encoder 檔 meta 的 `pre_stride`（間歇檔是從 stride 後的序列丟幀而來）。
+    對齊三件事任一不符就報錯：sensor 位置相同、保留時刻是完整時刻的子集、保留幀上的值一致。
+    """
+    meta = dataset["meta"]
+    if "pre_stride" not in meta:
+        raise ValueError(
+            f"{dataset['json_path']} 的 meta 無 pre_stride，無法決定監督序列的 stride")
+    sup = load_sensors_from_path(supervision_json, time_stride=int(meta["pre_stride"]))
+    if not np.array_equal(np.asarray(sup["sensor_pos"]), np.asarray(dataset["sensor_pos"])):
+        raise ValueError(f"{supervision_json} 的 sensor 位置與 encoder 檔不同")
+    ns_e, ns_s = dataset["norm_stats"], sup["norm_stats"]
+    if set(ns_e) != set(ns_s):
+        raise ValueError(f"兩檔的 channel 不同：{sorted(ns_e)} vs {sorted(ns_s)}")
+    chans = [k[:-len("_mean")] for k in ns_e if k.endswith("_mean")]
+    sv = np.asarray(sup["sensor_vals"], dtype=np.float64)
+    phys = np.stack([sv[..., i] * ns_s[f"{c}_std"] + ns_s[f"{c}_mean"] for i, c in enumerate(chans)], -1)
+    sup_vals = np.stack([(phys[..., i] - ns_e[f"{c}_mean"]) / ns_e[f"{c}_std"]
+                         for i, c in enumerate(chans)], -1).astype(np.float32)
+    t_sup = np.asarray(sup["sensor_time"], dtype=np.float64)
+    t_enc = np.asarray(dataset["sensor_time"], dtype=np.float64)
+    idx = np.argmin(np.abs(t_sup[None, :] - t_enc[:, None]), axis=1)   # 最近鄰，避開 float32 捨入
+    if np.max(np.abs(t_sup[idx] - t_enc)) > 1e-6 or len(set(idx.tolist())) != idx.size:
+        raise ValueError(f"encoder 的時刻不是 {supervision_json} 時刻的子集")
+    dv = float(np.max(np.abs(sup_vals[idx] - np.asarray(dataset["sensor_vals"]))))
+    if dv > 1e-4:
+        raise ValueError(f"保留幀上兩檔的 sensor 值不一致（正規化後最大差 {dv:.2e}）")
+    out = dict(dataset)
+    out["sup_vals"], out["sup_time"] = sup_vals, sup["sensor_time"]
+    return out
+
+
 def check_encoder_target_strides(*, encoder_time_stride: int, target_time_stride: int,
                                  arch: str, n_datasets: int, sensor_cut_min_frac: float,
                                  autoreg_pseudo_dt: float, sensor_dropout_rate: float,
@@ -152,6 +195,65 @@ def check_encoder_target_strides(*, encoder_time_stride: int, target_time_stride
     if int(encoder_time_stride) == 1 and int(target_time_stride) == 1:
         return
     tag = f"encoder_time_stride={encoder_time_stride}／target_time_stride={target_time_stride}"
+    if arch != "liquid":
+        raise ValueError(f"{tag} 只支援 arch=liquid（收到 {arch!r}）：B0/B2 沒有 encode/decode 拆分")
+    if int(n_datasets) != 1:
+        raise ValueError(f"{tag} 只支援單一 dataset（收到 {n_datasets} 個）")
+    for name, val in (("sensor_cut_min_frac", sensor_cut_min_frac),
+                      ("autoreg_pseudo_dt", autoreg_pseudo_dt),
+                      ("sensor_dropout_rate", sensor_dropout_rate)):
+        if float(val) != 0.0:
+            raise ValueError(f"{tag} 不得與 {name}={val} 同時開啟：兩者都改動 encoder 的時間軸")
+    if use_continuous_re_physics:
+        raise ValueError(f"{tag} 不得與 use_continuous_re_physics 同時開啟")
+    if str(refine_optimizer).lower() not in ("none", ""):
+        raise ValueError(f"{tag} 不得與 refine（{refine_optimizer!r}）同時開啟")
+
+
+def check_async_sensors(*, async_sensors: bool, data_has_nan: bool, supervision_sensor_json: str,
+                        encoder_time_stride: int, target_time_stride: int, arch: str, n_datasets: int,
+                        sensor_cut_min_frac: float, autoreg_pseudo_dt: float, sensor_dropout_rate: float,
+                        use_continuous_re_physics: bool, refine_optimizer: str) -> None:
+    """非同步取樣只在驗過的組合下放行；資料與模型開關不一致時報錯。兩者皆否時一律放行。"""
+    if data_has_nan and not async_sensors:
+        raise ValueError("sensor 資料含 NaN（非同步取樣檔），模型必須設 async_sensors = true")
+    if not async_sensors:
+        return
+    tag = "async_sensors=true"
+    if arch != "liquid":
+        raise ValueError(f"{tag} 只支援 arch=liquid（收到 {arch!r}）")
+    if int(n_datasets) != 1:
+        raise ValueError(f"{tag} 只支援單一 dataset（收到 {n_datasets} 個）")
+    if supervision_sensor_json:
+        raise ValueError(f"{tag} 不得與 supervision_sensor_json 同時使用")
+    if int(encoder_time_stride) != 1 or int(target_time_stride) != 1:
+        raise ValueError(f"{tag} 不得與 encoder/target_time_stride≠1 同時使用")
+    for name, val in (("sensor_cut_min_frac", sensor_cut_min_frac),
+                      ("autoreg_pseudo_dt", autoreg_pseudo_dt),
+                      ("sensor_dropout_rate", sensor_dropout_rate)):
+        if float(val) != 0.0:
+            raise ValueError(f"{tag} 不得與 {name}={val} 同時開啟")
+    if use_continuous_re_physics:
+        raise ValueError(f"{tag} 不得與 use_continuous_re_physics 同時開啟")
+    if str(refine_optimizer).lower() not in ("none", ""):
+        raise ValueError(f"{tag} 不得與 refine（{refine_optimizer!r}）同時開啟：refine 的 data 殘差未遮 NaN")
+
+
+def check_supervision_oracle(*, supervision_sensor_json: str, encoder_time_stride: int,
+                             target_time_stride: int, arch: str, n_datasets: int,
+                             sensor_cut_min_frac: float, autoreg_pseudo_dt: float,
+                             sensor_dropout_rate: float, use_continuous_re_physics: bool,
+                             refine_optimizer: str) -> None:
+    """oracle 監督只在驗過的組合下放行；未設定時一律放行。
+
+    理由同 `check_encoder_target_strides`：這些組合各自改動 encoder 或 decoder 的時間軸，
+    與「encoder 吃載入序列、監督吃完整序列」疊在一起時沒有人檢查過對齊語意。
+    """
+    if not supervision_sensor_json:
+        return
+    tag = f"supervision_sensor_json={supervision_sensor_json!r}"
+    if int(encoder_time_stride) != 1 or int(target_time_stride) != 1:
+        raise ValueError(f"{tag} 不得與 encoder/target_time_stride≠1 同時使用")
     if arch != "liquid":
         raise ValueError(f"{tag} 只支援 arch=liquid（收到 {arch!r}）：B0/B2 沒有 encode/decode 拆分")
     if int(n_datasets) != 1:
@@ -326,6 +428,8 @@ def _load_datasets(data: KolmogorovDataConfig, multi_re: bool) -> list[dict]:
         raise ValueError("TOML data_kwargs.sensor_jsons 為空，無法載入 sensor data")
 
     if multi_re:
+        if data.supervision_sensor_json:
+            raise ValueError("supervision_sensor_json 只支援單一 dataset（multi_re 下不得設定）")
         if len(json_paths) != len(re_values):
             raise ValueError(
                 f"multi_re 模式: sensor_jsons ({len(json_paths)}) 與 re_values "
@@ -348,6 +452,8 @@ def _load_datasets(data: KolmogorovDataConfig, multi_re: bool) -> list[dict]:
     re_value = float(re_values[0])
     d["re_value"] = re_value
     d["re_norm"] = float(np.log(re_value) / np.log(re_norm_scale))
+    if data.supervision_sensor_json:
+        d = _attach_supervision(d, data.supervision_sensor_json)
     return [d]
 
 
@@ -416,6 +522,21 @@ def _load_dns_for_eval(data: KolmogorovDataConfig) -> tuple[np.ndarray, np.ndarr
 # ─────────────────────────────────────────────────────────────────────────────
 # Loss assembly: closure that returns jit-able loss_fn
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _masked_sensor_loss(pred, target, ch_w, t_sensor_q, t_early_weight, t_early_threshold, T_total):
+    """非同步取樣的 data loss：只對有觀測（目標非 NaN）的點取加權平均。
+
+    t_early 加權與同步路徑同式；分母是被抽到且有觀測的點數，所以抽樣到多少缺值都不改變量綱。
+    """
+    valid = jnp.all(jnp.isfinite(target), axis=-1)                    # [n]
+    tgt = jnp.where(valid[:, None], target, 0.0)
+    err = jnp.mean(ch_w * (pred - tgt) ** 2, axis=-1)
+    w = valid.astype(err.dtype)
+    if t_early_weight != 1.0:
+        t_mask = (t_sensor_q < float(t_early_threshold) * float(T_total)).astype(err.dtype)
+        w = w * (t_mask * (float(t_early_weight) - 1.0) + 1.0)
+    return jnp.sum(w * err) / jnp.maximum(jnp.sum(valid.astype(err.dtype)), 1.0)
+
 
 def _encoder_inputs(model, params_, re_batch, sensor_input_mask,
                     autoreg_pseudo_times, autoreg_rounds, has_encode):
@@ -631,7 +752,11 @@ def _build_loss_fn(
             )
         ch_w = (jnp.asarray(sensor_channel_weights[:C], dtype=sensor_target.dtype)
                 if sensor_channel_weights else jnp.ones((C,), dtype=sensor_target.dtype))
-        if t_early_weight != 1.0:
+        if getattr(model, "async_sensors", False):
+            # 非同步取樣：NaN 目標＝沒有觀測，不計入（未開啟時此分支不存在，下方原式逐字不變）
+            sensor_loss = _masked_sensor_loss(pred[:, :C], sensor_target, ch_w, t_sensor_q,
+                                              t_early_weight, t_early_threshold, T_total)
+        elif t_early_weight != 1.0:
             t_threshold = float(t_early_threshold) * float(T_total)
             t_mask = (t_sensor_q < t_threshold).astype(jnp.float32)
             per_point_w = t_mask * (float(t_early_weight) - 1.0) + 1.0  # [T*K]
@@ -882,6 +1007,9 @@ def _build_grad_norm_fn(
                 if sensor_channel_weights else jnp.ones((C,), dtype=sensor_target.dtype))
         # t_early 加權與主 loss 同步（`_build_loss_fn` 同名區塊逐字對應）。缺了它，
         # G_data 量的是未加權的 data loss，而被最佳化的是加權版。
+        if getattr(model, "async_sensors", False):
+            return _masked_sensor_loss(pred[:, :C], sensor_target, ch_w, t_sensor_q,
+                                       t_early_weight, t_early_threshold, T_total)
         if t_early_weight != 1.0:
             t_threshold = float(t_early_threshold) * float(T_total)
             t_mask = (t_sensor_q < t_threshold).astype(jnp.float32)
@@ -1094,6 +1222,32 @@ def build_context(config: KolmogorovEffectiveConfig) -> TrainingContext:
 
     # encoder／監督 stride 拆開（K–Δt 2×2 消融）。預設 1/1 時守門不發聲、ReBatch 與舊版相同。
     check_encoder_target_strides(
+        encoder_time_stride=curriculum.encoder_time_stride,
+        target_time_stride=curriculum.target_time_stride,
+        arch=run.arch, n_datasets=n_datasets,
+        sensor_cut_min_frac=curriculum.sensor_cut_min_frac,
+        autoreg_pseudo_dt=curriculum.autoreg_pseudo_dt,
+        sensor_dropout_rate=curriculum.sensor_dropout_rate,
+        use_continuous_re_physics=config.loss.use_continuous_re_physics,
+        refine_optimizer=config.refinement.optimizer)
+
+    # 非同步取樣（NaN＝沒有觀測）。資料含 NaN 而模型沒開 async_sensors 時直接報錯，不讓 NaN 流進 loss。
+    check_async_sensors(
+        async_sensors=config.model.async_sensors,
+        data_has_nan=any(bool(np.isnan(np.asarray(d["sensor_vals"])).any()) for d in datasets),
+        supervision_sensor_json=config.data.supervision_sensor_json,
+        encoder_time_stride=curriculum.encoder_time_stride,
+        target_time_stride=curriculum.target_time_stride,
+        arch=run.arch, n_datasets=n_datasets,
+        sensor_cut_min_frac=curriculum.sensor_cut_min_frac,
+        autoreg_pseudo_dt=curriculum.autoreg_pseudo_dt,
+        sensor_dropout_rate=curriculum.sensor_dropout_rate,
+        use_continuous_re_physics=config.loss.use_continuous_re_physics,
+        refine_optimizer=config.refinement.optimizer)
+
+    # oracle 監督（診斷用）。未設定時守門不發聲、ReBatch 與舊版相同。
+    check_supervision_oracle(
+        supervision_sensor_json=config.data.supervision_sensor_json,
         encoder_time_stride=curriculum.encoder_time_stride,
         target_time_stride=curriculum.target_time_stride,
         arch=run.arch, n_datasets=n_datasets,

@@ -29,6 +29,7 @@ class KolmogorovDataConfig:
     time_strides: list
     re_norm_scale: float
     observed_sensor_channels: list
+    supervision_sensor_json: str
     kolmogorov_k_f: float
     kolmogorov_A: float
     cylinder_data_npz: str

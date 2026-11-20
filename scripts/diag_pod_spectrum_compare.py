@@ -72,15 +72,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def spectrum_of(u: np.ndarray, v: np.ndarray, subtract_mean: bool) -> np.ndarray:
-    """回傳 POD 能量特徵值 λ_n（降序）。與 pod_energy_fractions 同一套前處理。"""
-    x = np.concatenate([u.reshape(u.shape[0], -1), v.reshape(v.shape[0], -1)], axis=1)
-    if subtract_mean:
-        x = x - x.mean(axis=0, keepdims=True)
-    s = np.linalg.svd(x, full_matrices=False, compute_uv=False)
-    return np.square(s.astype(np.float64))
-
-
 def load_pred(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
     d = np.load(path)
     missing = [k for k in ("u_pred", "v_pred", "t") if k not in d.files]
@@ -136,7 +127,6 @@ def main() -> None:
 
     out = {"provenance": {}, "dns": {}, "pred": {}, "comparison": {}}
     for tag, (u, v) in (("dns", (u_d, v_d)), ("pred", (u_p, v_p))):
-        lam = spectrum_of(u, v, sub)
         frac = pod_energy_fractions(u, v, subtract_mean=sub)
         n_snap = int(u.shape[0])
         r = frac["rank_at"]

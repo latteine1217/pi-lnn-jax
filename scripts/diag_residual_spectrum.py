@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from pi_lnn_jax.data import _resolve_data_path
-from pi_lnn_jax.metric_artifact import compute_energy_spectrum, compute_vorticity
+from pi_lnn_jax.metric_artifact import compute_energy_spectrum
 from pi_lnn_jax.physics_field import vorticity_transport_residual
 
 

@@ -134,6 +134,23 @@ def model_fingerprint(model: Any) -> dict[str, Any]:
     # 同理，時間 cell 為預設 "cfc" 時省略：forward 與「從未有此欄位」逐位元相同。
     if getattr(model, "temporal_cell", "cfc") == "cfc":
         fp.pop("temporal_cell", None)
+    # 同理，scan 方向與 decoder 讀幀範圍在預設值時省略。
+    if getattr(model, "temporal_direction", "forward") == "forward":
+        fp.pop("temporal_direction", None)
+    if getattr(model, "decoder_frame_context", "latest") == "latest":
+        fp.pop("decoder_frame_context", None)
+    if not getattr(model, "cfc_residual", False):
+        fp.pop("cfc_residual", None)
+    if not getattr(model, "cfc_query_time", False):
+        fp.pop("cfc_query_time", None)
+    if getattr(model, "trunk_elapsed_time", True):
+        fp.pop("trunk_elapsed_time", None)
+    if not getattr(model, "async_sensors", False):
+        fp.pop("async_sensors", None)
+    if not getattr(model, "async_hold", False):
+        fp.pop("async_hold", None)
+    if getattr(model, "spatial_blocks", 1) == 1:
+        fp.pop("spatial_blocks", None)
     return fp
 
 

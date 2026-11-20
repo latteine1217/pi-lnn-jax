@@ -126,6 +126,22 @@ def test_fingerprint_covers_every_arch(arch):
         expected -= {"relpos_bias_zero_init"}
     if getattr(model, "temporal_cell", "cfc") == "cfc":
         expected -= {"temporal_cell"}
+    if getattr(model, "temporal_direction", "forward") == "forward":
+        expected -= {"temporal_direction"}
+    if getattr(model, "decoder_frame_context", "latest") == "latest":
+        expected -= {"decoder_frame_context"}
+    if not getattr(model, "cfc_residual", False):
+        expected -= {"cfc_residual"}
+    if not getattr(model, "cfc_query_time", False):
+        expected -= {"cfc_query_time"}
+    if getattr(model, "trunk_elapsed_time", True):
+        expected -= {"trunk_elapsed_time"}
+    if not getattr(model, "async_sensors", False):
+        expected -= {"async_sensors"}
+    if not getattr(model, "async_hold", False):
+        expected -= {"async_hold"}
+    if getattr(model, "spatial_blocks", 1) == 1:
+        expected -= {"spatial_blocks"}
     assert set(fp) == expected, f"{arch} 的指紋欄位與 dataclass 不符"
 
     if arch != "liquid":

@@ -19,11 +19,9 @@
 """
 from __future__ import annotations
 
-import ast
 import contextlib
 import io
 import json
-import pathlib
 import tempfile
 from dataclasses import replace
 from pathlib import Path

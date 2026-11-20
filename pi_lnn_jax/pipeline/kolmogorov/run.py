@@ -51,6 +51,10 @@ spec §5.4 迴圈內消費順序（條件性是承重的）
 5. `rng_collo, sub = split(rng_collo)` → `split(sub, 3)` → `cx, cy, ct`   恆
    （第 5 點的 split **無條件**發生，RAR 觸發時 `sub` 被丟棄不用——
     這正是 RAR 步與非 RAR 步之間 `rng_collo` 仍然對齊的原因。）
+
+終點修正：原隨機配點與 RNG 消費順序不變；每個梯度分塊額外加入一個
+資料末端的物理配點（尚在 time marching 時取目前時窗上界）。總點數增加
+`grad_accum_chunks`，因此此修正刻意不與舊 collocation ledger 逐位元相同。
 ═══════════════════════════════════════════════════════════════════════════
 
 Step planning（`_plan_step`）刻意留在本檔而非抽成獨立 pure function：
@@ -584,6 +588,20 @@ def _plan_step(
             keys[2], (n_collo_now,),
             minval=t_min_now, maxval=t_upper,
         )
+    # U[t_min,t_upper) 不會抽到資料末端，但 decoder 在該時刻切換到最後狀態。
+    # 每個分塊沿用首點的隨機空間位置，新增終點時間；保留原點與 RNG stream，
+    # 並使總點數仍可整除 grad_accum_chunks。RAR 選點也需要相同的終點保障。
+    chunks = int(curriculum.grad_accum_chunks)
+    endpoint = min(t_max_now, t_upper)
+    cx_chunks = cx.reshape(chunks, -1)
+    cy_chunks = cy.reshape(chunks, -1)
+    ct_chunks = ct.reshape(chunks, -1)
+    cx = jnp.concatenate((cx_chunks, cx_chunks[:, :1]), axis=1).reshape(-1)
+    cy = jnp.concatenate((cy_chunks, cy_chunks[:, :1]), axis=1).reshape(-1)
+    ct = jnp.concatenate(
+        (ct_chunks, jnp.full((chunks, 1), endpoint, dtype=ct.dtype)), axis=1,
+    ).reshape(-1)
+    n_collo_now += chunks
     # 四個觸發條件在此算一次，ledger 與下方控制流共用同一個值。
     # Why 提上來：若 ledger 自行再算一次，兩份條件會漂移，ledger 就會
     # 安靜說謊（正是 4792b93 治的那種病）。純布林值、無 RNG/副作用，

@@ -33,7 +33,7 @@ class _FakeModel:
             vals = args[0]
             self.encode_lengths.append(int(vals.shape[0]))
             return jnp.asarray(float(vals.shape[0]))
-        xy_q, t_q, h_states = args[0], args[1], args[2]
+        xy_q, h_states = args[0], args[2]
         return jnp.broadcast_to(h_states, (xy_q.shape[0], 3))
 
 

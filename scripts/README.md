@@ -63,6 +63,7 @@
 | `gen_sensors_sdf_isocontour.py` | cylinder SDF 等值線 placement |
 | `gen_sensors_re10000_T20.py` | Re=10⁴ 主 case sensor 集 |
 | `gen_sensors_qrpivot_dns.py` | DNS-pivot oracle placement：對 DNS 快照的 u、v、p_ref、ω、\|∇u\|、\|∇v\| 做 QRCP，各預算巢狀；軸向由散度檢查驗證（`tests/test_gen_sensors_qrpivot_dns.py`） |
+| `gen_async_sensors.py` | 由既有 sensor 組產生非同步不規則取樣版本：每個 sensor 各自保留固定幀數，其餘填 NaN（模型需 `async_sensors = true`） |
 
 上列前三支**不再跨 repo**：pi-lnn 依賴已於 2026-08-21（`bf08ff2`）消除，QR-pivot 的
 cylinder 實作已移植為 `_common/qrpivot_cylinder.py`，在本 repo env 直接執行即可

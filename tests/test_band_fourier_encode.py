@@ -9,7 +9,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 # 不在 module import 時全域改 x64——那會污染整個 test session（例如讓 SHRED 的
 # nn.RNN scan 拿到 float64 而炸）。用 float32 + 放寬 atol 即足夠驗證數值等價。

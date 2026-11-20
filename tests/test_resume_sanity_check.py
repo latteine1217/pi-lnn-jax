@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from pi_lnn_jax.pipeline.kolmogorov.run import deterministic_sensor_idx
 

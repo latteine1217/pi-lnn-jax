@@ -28,7 +28,6 @@ import numpy as np
 import pytest
 
 from pi_lnn_jax.evaluation_protocol import (
-    EvaluationProtocol,
     ProtocolMode,
     resolve_protocol,
 )

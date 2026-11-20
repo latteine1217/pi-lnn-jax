@@ -1,7 +1,8 @@
 """Ledger replay —— 對 golden fixture 的逐步比對。
 
-這是 bit-identical 契約在本機唯一可執行的證據。fixture 由 lab-server 錄製
-(Task 3)，本機不跑 training，只做純比對。
+fixture 由 lab-server 在 CPU 上錄製，本機不跑 training，只做純比對。自 2026-11-20
+起 fixture 取自 main（job 7522 的 HEAD 側），本檔驗的是「main 的 host 決策與錄製當時
+相同」，不是重構前後的 bit-identical 契約——那由 lab-server 的 `submit_verify.sh` 承擔。
 
 失敗訊息刻意報出「第一個分岔的 step 與欄位」——「跑完 N 步比 params」
 只能告訴你壞了，這裡要告訴你哪一步壞的。

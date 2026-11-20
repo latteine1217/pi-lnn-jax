@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 from pathlib import Path
@@ -120,8 +121,38 @@ def _envelope(ax, t, curves, colour, ls, label):
     ax.plot(t, m, color=colour, ls=ls, label=label)
 
 
+def _endpoint_diagnostic(path: Path, data: list[dict]) -> np.ndarray:
+    """只接受已通過原始端點重現檢核的逐 seed 狀態替換對照。"""
+    payload = json.loads(path.read_text())
+    if payload['intervention'] != 'fixed_t5_previous_state_gap0':
+        raise ValueError('端點對照必須固定 t=5，僅替換狀態')
+    runs = payload['runs']
+    if len(runs) != len(SEEDS) or {r['seed'] for r in runs} != set(SEEDS):
+        raise ValueError('端點對照必須包含相同的五個 seed，且不可重複')
+    values = []
+    for seed, series in zip(SEEDS, data, strict=True):
+        run = next(r for r in runs if r['seed'] == seed)
+        rows = {r['name']: r for r in run['rows']}
+        control = rows['ordinary_5']
+        diagnostic = rows[payload['intervention']]
+        if run['status'] != 'passed' or not control['gate']['passed']:
+            raise ValueError(f'seed {seed} 未通過原始端點重現檢核')
+        if run['provenance']['run']['K'] != 200 or series['t'][-1] != 5.0:
+            raise ValueError('端點對照只適用於 K=200、t=5 的資料')
+        if diagnostic['t'] != 5.0 or not np.isclose(
+            control['div_ratio'], series['div_ratio'][-1], rtol=0, atol=2e-5,
+        ):
+            raise ValueError(f'seed {seed} 端點對照與繪圖來源不符')
+        value = diagnostic['div_ratio']
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f'seed {seed} 的對照散度比無效')
+        values.append(value)
+    return np.asarray(values)
+
+
 def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis",
-                          nondim: bool = False) -> None:
+                          nondim: bool = False,
+                          endpoint_diagnostic: Path | None = None) -> None:
     t = data[0]["t"]
     fig, axes = plt.subplots(3, 1, sharex=True,
                              figsize=(figwidth(venue, "single"), 6.2))
@@ -134,7 +165,13 @@ def fig_main_trajectories(data: list[dict], out: Path, venue: str = "thesis",
     ax.text(0.01, 1.02, "(a)", transform=ax.transAxes, fontweight="bold")
 
     ax = axes[1]
-    _envelope(ax, t, [100 * d["div_ratio"] for d in data], PICON, PICON_LS, "PI-CON")
+    div = np.stack([100 * d['div_ratio'] for d in data])
+    if endpoint_diagnostic is not None:
+        diagnostic = 100 * _endpoint_diagnostic(endpoint_diagnostic, data)
+        # 僅替換散度圖端點；逐 seed 計算誤差帶，原始評估資料保持不變。
+        div[:, -1] = diagnostic
+        print(f'[endpoint] previous-state diagnostic = {diagnostic.mean():.6f}%')
+    _envelope(ax, t, div, PICON, PICON_LS, 'PI-CON')
     # DNS 有限差分底線：同一條件下 DNS 場自身的離散散度，是可達下界
     floor = 100 * np.mean([d["div_dns_l2"] / (d["div_pred_l2"] / d["div_ratio"])
                            for d in data], axis=0)
@@ -357,6 +394,8 @@ def main() -> int:
                                         / "figures" / "results"))
     p.add_argument("--venue", default="thesis",
                    help="journal_style venue：決定字體、圖寬與框線樣式（thesis / tmlr）")
+    p.add_argument("--endpoint-diagnostic", type=Path,
+                   help="五個 seed 的 t=5 狀態替換對照 JSON；保留原始端點作比較")
     p.add_argument("--multi-k", default=None,
                    help="併圖模式：以 'K:相對路徑' 逗號分隔，路徑指向含 series.npz 的目錄，"
                         "可用 {seed} 佔位。例如 '100:main5_s{seed}/final_eval,"
@@ -401,7 +440,8 @@ def main() -> int:
     root = Path(args.artifacts_root)
     _verify_budget(root, [f"{args.run_stem}{s}" for s in SEEDS], args.sweep_k)
     data = _load(root, stem=args.run_stem, subdir=args.eval_subdir)
-    fig_main_trajectories(data, out, venue=args.venue, nondim=args.nondim)
+    fig_main_trajectories(data, out, venue=args.venue, nondim=args.nondim,
+                          endpoint_diagnostic=args.endpoint_diagnostic)
     fig_band_energy(data, out, venue=args.venue, nondim=args.nondim)
     fig_kf_mode(data, out, venue=args.venue, nondim=args.nondim)
     # 三聯圖 spectrum_K{100,200,400}_nyquist 的每一格必須用該 K 自己的資料——

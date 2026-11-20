@@ -1,10 +1,10 @@
 [
   {
-    "ct": "6cb9524108a1c5e8",
-    "cx": "f16e9e311fc8cbec",
-    "cy": "1d37d232e5d047f5",
+    "ct": "5cb2f4594ee06e37",
+    "cx": "7b5177ce3e50622e",
+    "cy": "5b9e2d3b34d44761",
     "dropout_mask": "39b107ed7993eee7",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 6,
     "re_norm_p": 0.9080808162689209,
     "sensor_idx": "ab1e3a69f3a68e11",
@@ -17,11 +17,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "a961cd32bedfd1ae",
-    "cx": "7fc0307ceaa57d80",
-    "cy": "ef9ae5da81754341",
+    "ct": "9c4e54fc17de86d0",
+    "cx": "6be21dca37fb9023",
+    "cy": "9141f7eae3a2b50c",
     "dropout_mask": "cd79d180d40ce8a6",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 0,
     "re_norm_p": 0.6430284976959229,
     "sensor_idx": "fd89b66aa18bc0b3",
@@ -34,11 +34,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "859d1d9d99ed3c2b",
-    "cx": "076d6edad528fc85",
-    "cy": "7e0d4a03334c2362",
+    "ct": "3dd914295492735b",
+    "cx": "5e721d0800bbe317",
+    "cy": "10375c7f4b700523",
     "dropout_mask": "c688d2460e16396d",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 7,
     "re_norm_p": 0.7496588826179504,
     "sensor_idx": "91e6c3790b5af604",
@@ -51,11 +51,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "deb53bf74bc48c30",
-    "cx": "997f22051620c9de",
-    "cy": "0dfc63d1b497d9a1",
+    "ct": "e3b7cdf8f927e617",
+    "cx": "e8b29cc6c27847b1",
+    "cy": "41e17161f92d404b",
     "dropout_mask": "57eb8864b004540e",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 0,
     "re_norm_p": 0.5308545231819153,
     "sensor_idx": "9501dfc211854799",
@@ -68,11 +68,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "04ce576b6d2543d6",
-    "cx": "f9242326e830cf94",
-    "cy": "c5ba9ad2bb8defa5",
+    "ct": "15532a2c5357a3a4",
+    "cx": "c9ad590f85db9081",
+    "cy": "732aacfc0c202c0c",
     "dropout_mask": "3f4e08adf4922278",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 1,
     "re_norm_p": 0.8571059107780457,
     "sensor_idx": "e607829be4ff1f55",
@@ -85,11 +85,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "c327d394887fa5b3",
-    "cx": "7ed2f90c0daadfe3",
-    "cy": "f0d0057fe02d7592",
+    "ct": "15d675ed113b0806",
+    "cx": "580fa661d4e8654a",
+    "cy": "73510565e93e2c5a",
     "dropout_mask": "61efbc23c8c78dda",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 5,
     "re_norm_p": 0.9327031970024109,
     "sensor_idx": "7d49301f5abec6f0",
@@ -102,11 +102,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "084a3d0707717d32",
-    "cx": "6ccce3e971f5037f",
-    "cy": "419abd2d882ccd62",
+    "ct": "b842f3fb9af9c942",
+    "cx": "0571e4a51ac43a7d",
+    "cy": "50a4b1cf7581e40a",
     "dropout_mask": "d0a4f291f84f9203",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 3,
     "re_norm_p": 0.5847036838531494,
     "sensor_idx": "61964f8707adc2eb",
@@ -119,11 +119,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "08f5e83868ae2872",
-    "cx": "5abcfb492d1cc5a0",
-    "cy": "2b83ddff7451f923",
+    "ct": "594521bdddf6c8c1",
+    "cx": "556a85cd726453d4",
+    "cy": "dd69d9300fb9de11",
     "dropout_mask": "91cdd9bc9b37e88a",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 2,
     "re_norm_p": 0.565587043762207,
     "sensor_idx": "a9d4710642cc5047",
@@ -136,11 +136,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "bdb3fb408bfbb475",
-    "cx": "7b4d26db1a8bac62",
-    "cy": "9c4b32a43bfb10a7",
+    "ct": "06ee94c1f48d72a5",
+    "cx": "e4867fec15d9de79",
+    "cy": "0dca665d81ab3dcd",
     "dropout_mask": "224e52feab157c3e",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 5,
     "re_norm_p": 0.942780077457428,
     "sensor_idx": "23f530a5adc96487",
@@ -153,11 +153,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "0448f678caaa84b9",
-    "cx": "6a3fc74221bdeacd",
-    "cy": "ae51995d9bb47d02",
+    "ct": "90dca876facc2f77",
+    "cx": "196c94da5b4fae4c",
+    "cy": "3d4f597c8cec2e67",
     "dropout_mask": "0bc55729ff883364",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 0,
     "re_norm_p": 0.5937554836273193,
     "sensor_idx": "6ec03b4428f2123b",
@@ -170,11 +170,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "b2df5615717b63a5",
-    "cx": "a3465295d8f7f70c",
-    "cy": "1446469594f02edc",
+    "ct": "1f4318e86a7dd72b",
+    "cx": "7143f921b18ec02c",
+    "cy": "b72967c0043836a5",
     "dropout_mask": "50385e73e82f82da",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 2,
     "re_norm_p": 0.7546637058258057,
     "sensor_idx": "6109cac26ff16975",
@@ -187,11 +187,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "efa20b18403c7dc6",
-    "cx": "4bdb177e274c5f2c",
-    "cy": "249aeabac02aa786",
+    "ct": "2abab9071f7a0f00",
+    "cx": "56a73bf79ced4269",
+    "cy": "7cdf6ac5f5882b2a",
     "dropout_mask": "06457bff95071155",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 6,
     "re_norm_p": 0.908581018447876,
     "sensor_idx": "4576be04644823b4",
@@ -204,11 +204,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "43ca55d583420c52",
-    "cx": "6e3e2e838666b5b7",
-    "cy": "6367fbdb59572a69",
+    "ct": "876364db5662327b",
+    "cx": "4d7bf8e63fe04bed",
+    "cy": "f34abfe6bfb6c42b",
     "dropout_mask": "80184b6d22a3c8ae",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 1,
     "re_norm_p": 0.9524770379066467,
     "sensor_idx": "57642f86f3bcfc90",
@@ -221,11 +221,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "fa4716168184b28a",
-    "cx": "e54a1f994ef9dbe8",
-    "cy": "61c3af9ab5a0cd86",
+    "ct": "9ec7f23cc4ed374a",
+    "cx": "7d567ee8d8c63915",
+    "cy": "35a3d8aad48123f5",
     "dropout_mask": "63808d3daea7b6f0",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 2,
     "re_norm_p": 0.5045109987258911,
     "sensor_idx": "c320fd955cb0600d",
@@ -238,11 +238,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "4d0e807eac914e1d",
-    "cx": "ab2f24a10a7e2619",
-    "cy": "29592c9c4f8f201b",
+    "ct": "7f10b5a4537bee3c",
+    "cx": "65c00b7303afa8c0",
+    "cy": "2e92649b22c7bbcd",
     "dropout_mask": "57b8ba6ea8f13936",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 2,
     "re_norm_p": 0.7905902862548828,
     "sensor_idx": "cff69b173908ef8f",
@@ -255,11 +255,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "65d29adc5c537e03",
-    "cx": "3e5cc24e0da495c1",
-    "cy": "6b0a45898dd7c6f7",
+    "ct": "532390e13e36d311",
+    "cx": "d38591d10d04d84f",
+    "cy": "2a072cd2f3903290",
     "dropout_mask": "f6a3e5467bde46ac",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 2,
     "re_norm_p": 0.86934494972229,
     "sensor_idx": "75327bc0a5b09164",
@@ -272,11 +272,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "b3fb5b1972989801",
-    "cx": "a96b1431c70799b9",
-    "cy": "22c36f55f14f5d44",
+    "ct": "897e7cf30b4fd8f8",
+    "cx": "b694164322eeb335",
+    "cy": "8fe2d7dcb4377ec9",
     "dropout_mask": "b763a194442f3533",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 1,
     "re_norm_p": 0.5736324191093445,
     "sensor_idx": "e081d4d8d514f935",
@@ -289,11 +289,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "3f7df461da033112",
-    "cx": "f73efb1cc686a3ab",
-    "cy": "aaa70dd6515c826f",
+    "ct": "8f159840f8f22841",
+    "cx": "715e539f9504d767",
+    "cy": "cf3225165789bd0d",
     "dropout_mask": "7261f8769f090780",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 3,
     "re_norm_p": 0.6417641043663025,
     "sensor_idx": "c29b7cf179eb6ac9",
@@ -306,11 +306,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "c09705f9f4447b07",
-    "cx": "0791efed7ccf342c",
-    "cy": "ba6653a94ff3cdc2",
+    "ct": "e066f7a7d8535e09",
+    "cx": "230b5d4a57b08b83",
+    "cy": "3ece6301003d118d",
     "dropout_mask": "4ac7c2b428fb3703",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 4,
     "re_norm_p": 0.8119352459907532,
     "sensor_idx": "7bb424238adcffbd",
@@ -323,11 +323,11 @@
     "w_phys": 0.01
   },
   {
-    "ct": "061a664a9467097a",
-    "cx": "ad4857f03c0daa1e",
-    "cy": "987a4fd7306258bd",
+    "ct": "56fbd283c08ef0f8",
+    "cx": "e8fa1cdda35bba55",
+    "cy": "083fae3da62bed34",
     "dropout_mask": "5b0abe84e5cbb80c",
-    "n_collo": 16,
+    "n_collo": 17,
     "re_idx": 1,
     "re_norm_p": 0.7193354964256287,
     "sensor_idx": "abbc6b2ee9ff38f1",
@@ -357,7 +357,7 @@
       "--eval_every",
       "0"
     ],
-    "config_path": "/home/junyi/pi-lnn-jax-base/configs/_ledger_f2.toml",
+    "config_path": "/home/junyi/pi-lnn-jax-ledger/configs/_ledger_f2.toml",
     "data_meta": {
       "crp_interp": {
         "p_mean": [
@@ -497,8 +497,8 @@
       "system": "Linux"
     },
     "init_params_digest": "569028bc554609dc",
-    "opt_state_digest": "726dda2aa1866396",
-    "params_digest": "c31b1690643a69f6",
+    "opt_state_digest": "cfd1317060008c88",
+    "params_digest": "51160683f7667da8",
     "step": -1
   }
 ]
